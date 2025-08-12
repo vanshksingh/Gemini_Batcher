@@ -248,4 +248,4 @@ if is_job_active:
             except Exception as e:
                 st.warning(f"Could not delete job from API (it may have been deleted): {e}")
             finally:
-                reset_app_state()
+                reset_app_state() #v1
