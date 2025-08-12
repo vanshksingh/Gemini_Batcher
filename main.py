@@ -50,7 +50,7 @@ def display_job_output(results_str):
     """Parses and neatly displays the results from a batch job."""
     st.subheader("✅ Job Results")
     try:
-        # The result from the API is a JSON string, so we parse it.
+        # The result from the API is a list of JSON strings, so we parse each one.
         results_list = [json.loads(res) for res in results_str]
 
         # Display each result in an expander
@@ -58,14 +58,15 @@ def display_job_output(results_str):
             with st.expander(f"**Response for Request {i + 1}**", expanded=True):
                 # Extract and display the actual generated text.
                 text_content = \
-                res_json.get('response', {}).get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get(
-                    'text', 'No text content found.')
+                    res_json.get('response', {}).get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[
+                        0].get(
+                        'text', 'No text content found.')
                 st.markdown(text_content)
                 with st.popover("View Raw JSON"):
                     st.json(res_json)
     except (json.JSONDecodeError, IndexError, KeyError, TypeError) as e:
         st.error(f"Could not parse results. Error: {e}")
-        st.code(results_str, language='json')
+        st.code(str(results_str), language='json')
 
 
 def reset_app_state():
@@ -83,24 +84,44 @@ st.title("📦 Gemini Batch Runner Pro")
 # --- Sidebar for Configuration and API Key ---
 with st.sidebar:
     st.header("🛠️ Configuration")
-
-    # --- API Key Management ---
     st.subheader("API Key")
-    # Try to get key from Streamlit secrets first
-    try:
-        st.session_state[STATE_API_KEY] = st.secrets["GEMINI_API_KEY"]
-        st.success("API Key loaded from secrets.", icon="✅")
-    except (FileNotFoundError, KeyError):
-        st.info("No API Key found in secrets. Please provide one below.")
-        api_key_input = st.text_input("Enter your Gemini API Key", type="password", key="api_key_input")
-        if api_key_input:
-            st.session_state[STATE_API_KEY] = api_key_input
-            st.success("API Key accepted.", icon="👍")
 
-    # Disable submission form if API key is missing
-    is_api_key_set = bool(st.session_state.get(STATE_API_KEY))
-    if not is_api_key_set:
+    # Try to load from secrets only if the key isn't already in the session state
+    if not st.session_state.get(STATE_API_KEY):
+        try:
+            st.session_state[STATE_API_KEY] = st.secrets["GEMINI_API_KEY"]
+            st.success("API Key loaded from secrets.", icon="✅")
+        except (FileNotFoundError, KeyError):
+            st.info("No API Key found in secrets. Please provide one below.")
+
+    # Get API key from user input, using the session state value as the default
+    user_api_key_input = st.text_input(
+        "Enter your Gemini API Key",
+        type="password",
+        value=st.session_state.get(STATE_API_KEY, "")
+    )
+
+    # If the user input differs from the session state, update it and rerun
+    if user_api_key_input != st.session_state.get(STATE_API_KEY):
+        st.session_state[STATE_API_KEY] = user_api_key_input
+        st.rerun()
+
+    if st.button("Clear Key"):
+        st.session_state[STATE_API_KEY] = None
+        st.rerun()
+
+    # On every script run, initialize the client if an API key is available
+    is_api_key_set = False
+    if st.session_state.get(STATE_API_KEY):
+        try:
+            initialize_client(st.session_state[STATE_API_KEY])
+            is_api_key_set = True
+        except Exception as e:
+            st.error(f"Failed to initialize client: {e}")
+            st.stop()
+    else:
         st.warning("Please provide an API key to proceed.")
+        st.stop()
 
     st.divider()
     model = st.selectbox("Model", ["gemini-1.5-pro-latest", "gemini-1.5-flash-latest"], disabled=not is_api_key_set)
@@ -115,20 +136,17 @@ if not is_job_active:
     st.header("✍️ 1. Submit a New Batch Job")
     with st.form("submission_form"):
         prompt_input = st.text_area("Enter prompts (one per line)", height=250, key="prompt_input_area")
-        submitted = st.form_submit_button("🚀 Submit & Start Polling", type="primary", disabled=not is_api_key_set)
+        submitted = st.form_submit_button("🚀 Submit Job", type="primary", disabled=not is_api_key_set)
 
     if submitted:
         prompts = [p.strip() for p in prompt_input.split("\n") if p.strip()]
         if not prompts:
             st.warning("Please enter at least one prompt.")
         else:
-            with st.spinner("Initializing client and submitting job..."):
+            with st.spinner("Submitting job..."):
                 try:
-                    # Initialize the client with the provided API key
-                    initialize_client(st.session_state[STATE_API_KEY])
-
                     # --- Exponential Backoff Logic ---
-                    base_wait_time = 2  # seconds
+                    base_wait_time = 2
                     max_retries = 5
                     job = None
                     for i in range(max_retries):
@@ -149,10 +167,7 @@ if not is_job_active:
                                 finally:
                                     if os.path.exists(jsonl_path):
                                         os.remove(jsonl_path)
-
-                            # If successful, break the retry loop
-                            break
-
+                            break  # If successful, break the retry loop
                         except ResourceExhausted as e:
                             if i < max_retries - 1:
                                 wait_time = (base_wait_time ** i) + random.random()
@@ -160,15 +175,13 @@ if not is_job_active:
                                 time.sleep(wait_time)
                             else:
                                 st.error(f"🚨 API Error: Quota limit hit and max retries exceeded. {e}", icon="🔥")
-                                raise e  # Re-raise the exception to be caught by the outer block
-
+                                raise e
                     if job:
                         st.session_state[STATE_JOB_NAME] = job.name
                         st.session_state[STATE_JOB_STATUS] = job.state.name
                         cookies.set(COOKIE_NAME, job.name,
                                     expires_at=datetime.datetime.now() + datetime.timedelta(days=7))
                         st.rerun()
-
                 except (GoogleAPICallError, Exception) as e:
                     st.error(f"🚨 Critical Error: Failed to submit job. {e}", icon="🔥")
 
@@ -177,72 +190,62 @@ if is_job_active:
     st.header("⏳ 2. Monitor Active Job")
     st.info(f"**Job Name:** `{st.session_state[STATE_JOB_NAME]}`")
 
-    # Initialize client for monitoring if not already done
-    if not is_api_key_set:
-        st.error("API Key is required to monitor job status.")
-    else:
-        initialize_client(st.session_state[STATE_API_KEY])
-
-        # Auto-polling logic
-        if st.session_state[STATE_JOB_STATUS] not in TERMINAL_STATES:
-            with st.spinner(f"Polling status... Current state: {st.session_state.get(STATE_JOB_STATUS, 'UNKNOWN')}"):
-                time.sleep(20)  # Wait before the next poll
+    # --- Manual Polling Section ---
+    if st.session_state[STATE_JOB_STATUS] not in TERMINAL_STATES:
+        if st.button("🔄 Refresh Job Status"):
+            with st.spinner("Polling status..."):
                 try:
                     job = poll_batch_job_status(st.session_state[STATE_JOB_NAME])
                     st.session_state[STATE_JOB_STATUS] = job.state.name
-
                     if st.session_state[STATE_JOB_STATUS] == "JOB_STATE_SUCCEEDED":
                         st.session_state[STATE_JOB_RESULTS] = retrieve_batch_job_results(
                             st.session_state[STATE_JOB_NAME])
-
                     st.rerun()
                 except Exception as e:
                     st.error(f"🚨 API Error while polling: {e}", icon="🔥")
-                    st.session_state[STATE_JOB_STATUS] = "JOB_STATE_FAILED"  # Assume failure
-
-        # --- Display Final Status, Results, and Actions ---
-        final_status = st.session_state[STATE_JOB_STATUS]
-
-        if final_status == "JOB_STATE_SUCCEEDED":
-            st.success(f"**Status:** `{final_status}`")
-            if st.session_state[STATE_JOB_RESULTS]:
-                # Prepare data for download
-                results_json_string = json.dumps(
-                    [json.loads(res) for res in st.session_state[STATE_JOB_RESULTS]],
-                    indent=2
-                )
-
-                # --- DOWNLOAD BUTTON ---
-                st.download_button(
-                    label="⬇️ Download Results (JSON)",
-                    data=results_json_string,
-                    file_name=f"gemini_batch_results_{st.session_state[STATE_JOB_NAME].split('/')[-1]}.json",
-                    mime="application/json",
-                    type="primary"
-                )
-                st.divider()
-                display_job_output(st.session_state[STATE_JOB_RESULTS])
-
-        elif final_status in ["JOB_STATE_FAILED", "JOB_STATE_CANCELLED"]:
-            st.error(f"**Status:** `{final_status}`") if final_status == "JOB_STATE_FAILED" else st.warning(
-                f"**Status:** `{final_status}`")
-
-        st.divider()
-        st.header("⚙️ 3. Manage Job")
-        col1, col2 = st.columns(2)
-        with col1:
-            is_cancellable = st.session_state[STATE_JOB_STATUS] not in TERMINAL_STATES
-            if st.button("❌ Cancel Job", disabled=not is_cancellable):
-                with st.spinner("Sending cancellation request..."):
-                    cancel_batch_job(st.session_state[STATE_JOB_NAME])
-                    st.session_state[STATE_JOB_STATUS] = "JOB_STATE_CANCELLED"
+                    st.session_state[STATE_JOB_STATUS] = "JOB_STATE_FAILED"
                     st.rerun()
 
-        with col2:
-            if st.button("🗑️ Delete & Reset App", type="secondary"):
-                try:
-                    delete_batch_job(st.session_state[STATE_JOB_NAME])
-                except Exception as e:
-                    st.warning(f"Could not delete job from API (it may have been deleted): {e}")
-                finally:
-                    reset_app_state()
+    # --- Display Final Status, Results, and Actions ---
+    final_status = st.session_state.get(STATE_JOB_STATUS, "UNKNOWN")
+
+    # Use columns for a cleaner layout
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.metric("Current Status", final_status)
+
+    if final_status == "JOB_STATE_SUCCEEDED":
+        st.success("Job completed successfully.")
+        if st.session_state.get(STATE_JOB_RESULTS):
+            results_json_string = json.dumps([json.loads(res) for res in st.session_state[STATE_JOB_RESULTS]], indent=2)
+            st.download_button(
+                label="⬇️ Download Results (JSON)",
+                data=results_json_string,
+                file_name=f"gemini_batch_results_{st.session_state[STATE_JOB_NAME].split('/')[-1]}.json",
+                mime="application/json",
+                type="primary"
+            )
+            st.divider()
+            display_job_output(st.session_state[STATE_JOB_RESULTS])
+    elif final_status in ["JOB_STATE_FAILED", "JOB_STATE_CANCELLED"]:
+        st.error("Job did not complete successfully.") if final_status == "JOB_STATE_FAILED" else st.warning(
+            "Job was cancelled.")
+
+    st.divider()
+    st.header("⚙️ 3. Manage Job")
+    c1, c2 = st.columns(2)
+    with c1:
+        is_cancellable = final_status not in TERMINAL_STATES
+        if st.button("❌ Cancel Job", disabled=not is_cancellable, use_container_width=True):
+            with st.spinner("Sending cancellation request..."):
+                cancel_batch_job(st.session_state[STATE_JOB_NAME])
+                st.session_state[STATE_JOB_STATUS] = "JOB_STATE_CANCELLED"
+                st.rerun()
+    with c2:
+        if st.button("🗑️ Delete & Reset App", type="secondary", use_container_width=True):
+            try:
+                delete_batch_job(st.session_state[STATE_JOB_NAME])
+            except Exception as e:
+                st.warning(f"Could not delete job from API (it may have been deleted): {e}")
+            finally:
+                reset_app_state()
