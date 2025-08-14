@@ -7,9 +7,12 @@ import random
 import streamlit_cookies_manager
 from google.api_core.exceptions import GoogleAPICallError, ResourceExhausted
 
+# --- Page and State Configuration ---
+# This MUST be the first Streamlit command in your script.
+st.set_page_config(page_title="Gemini Batch Runner Pro", layout="wide", initial_sidebar_state="expanded")
+
 # This is a placeholder for your actual batch handler functions.
 # You need a 'batch_handler.py' file in the same directory.
-# It should contain functions that initialize the Gemini client with an API key.
 from batch_handler import (
     initialize_client,
     create_inline_batch_job,
@@ -20,9 +23,6 @@ from batch_handler import (
     delete_batch_job
 )
 
-# --- Page and State Configuration ---
-st.set_page_config(page_title="Gemini Batch Runner Pro", layout="wide", initial_sidebar_state="expanded")
-
 # Constants for session state keys for cleaner access
 COOKIE_NAME = "gemini_batch_job_name"
 STATE_JOB_NAME = "job_name"
@@ -32,6 +32,7 @@ STATE_API_KEY = "api_key"
 TERMINAL_STATES = ["JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED", "JOB_STATE_CANCELLED"]
 
 # --- Cookie and Session State Initialization ---
+# This now comes AFTER st.set_page_config()
 cookies = streamlit_cookies_manager.CookieManager()
 
 # Initialize all session state keys to prevent errors
@@ -248,4 +249,4 @@ if is_job_active:
             except Exception as e:
                 st.warning(f"Could not delete job from API (it may have been deleted): {e}")
             finally:
-                reset_app_state() #v1
+                reset_app_state()
