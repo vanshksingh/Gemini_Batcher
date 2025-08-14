@@ -23,31 +23,25 @@ from batch_handler import (
 )
 
 # Constants for session state keys for cleaner access
-COOKIE_JOB_NAME = "gemini_batch_job_name"
-COOKIE_API_KEY = "gemini_api_key"  # New cookie for the API key
+COOKIE_JOB_HISTORY = "gemini_job_history"
+COOKIE_API_KEY = "gemini_api_key"
 STATE_JOB_NAME = "job_name"
 STATE_JOB_STATUS = "job_status"
 STATE_JOB_RESULTS = "job_results"
 STATE_API_KEY = "api_key"
+STATE_LAST_REQUEST = "last_request"  # To store prompts/file for retry
 TERMINAL_STATES = ["JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED", "JOB_STATE_CANCELLED"]
 
 # --- Cookie and Session State Initialization ---
-# This now comes AFTER st.set_page_config()
 cookies = streamlit_cookies_manager.CookieManager()
 if not cookies.ready():
-    # Wait for the frontend to send cookies to the backend.
     st.spinner()
     st.stop()
 
-# Initialize all session state keys to prevent errors
-for key in [STATE_JOB_NAME, STATE_JOB_STATUS, STATE_JOB_RESULTS, STATE_API_KEY]:
+# Initialize all session state keys
+for key in [STATE_JOB_NAME, STATE_JOB_STATUS, STATE_JOB_RESULTS, STATE_API_KEY, STATE_LAST_REQUEST]:
     if key not in st.session_state:
         st.session_state[key] = None
-
-# Restore job name from cookie on first load
-if not st.session_state[STATE_JOB_NAME] and (previous_job := cookies.get(COOKIE_JOB_NAME)):
-    st.session_state[STATE_JOB_NAME] = previous_job
-    st.toast(f"Restored monitoring for job: {previous_job}")
 
 
 # --- Helper Functions ---
@@ -75,14 +69,72 @@ def display_job_output(results_str, preview_limit=50):
         st.code(str(results_str), language='json')
 
 
-def reset_app_state():
+def generate_local_summary(results_str):
+    """Analyzes results locally to generate a simple summary."""
+    st.subheader("📊 Results Summary")
+    try:
+        results_list = [json.loads(res) for res in results_str]
+        total = len(results_list)
+        errors = 0
+        refusals = 0
+
+        refusal_keywords = ["cannot", "unable", "sorry", "i am not able"]
+
+        for res_json in results_list:
+            text_content = \
+            res_json.get('response', {}).get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text',
+                                                                                                                 '').lower()
+            if not text_content or "error" in text_content:
+                errors += 1
+            elif any(keyword in text_content for keyword in refusal_keywords):
+                refusals += 1
+
+        success = total - errors - refusals
+
+        st.markdown(f"""
+        - **Total Responses:** {total}
+        - **Successful Responses:** {success}
+        - **Content Refusals:** {refusals}
+        - **Errors/Empty Responses:** {errors}
+        """)
+
+    except Exception as e:
+        st.warning(f"Could not generate local summary: {e}")
+
+
+def reset_app_state(clear_history=False):
     """Fully resets the application state and cookies."""
-    if COOKIE_JOB_NAME in cookies:
-        del cookies[COOKIE_JOB_NAME]
-    for key in [STATE_JOB_NAME, STATE_JOB_STATUS, STATE_JOB_RESULTS]:
+    if clear_history and COOKIE_JOB_HISTORY in cookies:
+        del cookies[COOKIE_JOB_HISTORY]
+
+    history = get_job_history()
+    if st.session_state.get(STATE_JOB_NAME) in history:
+        history.remove(st.session_state[STATE_JOB_NAME])
+        save_job_history(history)
+
+    for key in [STATE_JOB_NAME, STATE_JOB_STATUS, STATE_JOB_RESULTS, STATE_LAST_REQUEST]:
         st.session_state[key] = None
     st.toast("Application has been reset.")
     st.rerun()
+
+
+def get_job_history():
+    """Retrieves job history from cookies."""
+    history = cookies.get(COOKIE_JOB_HISTORY)
+    return json.loads(history) if history else []
+
+
+def save_job_history(history):
+    """Saves job history to cookies, keeping only the last 10."""
+    cookies[COOKIE_JOB_HISTORY] = json.dumps(history[:10])
+
+
+def add_to_job_history(job_name):
+    """Adds a new job to the history."""
+    history = get_job_history()
+    if job_name not in history:
+        history.insert(0, job_name)
+        save_job_history(history)
 
 
 # --- Main App UI ---
@@ -93,7 +145,6 @@ with st.sidebar:
     st.header("🛠️ Configuration")
     st.subheader("API Key")
 
-    # Load API key from cookies if not in session state
     if not st.session_state.get(STATE_API_KEY):
         st.session_state[STATE_API_KEY] = cookies.get(COOKIE_API_KEY)
 
@@ -105,13 +156,11 @@ with st.sidebar:
 
     if user_api_key_input != st.session_state.get(STATE_API_KEY):
         st.session_state[STATE_API_KEY] = user_api_key_input
-        # Use dictionary-style assignment to set the cookie
         cookies[COOKIE_API_KEY] = user_api_key_input
         st.rerun()
 
     if st.button("Clear & Forget API Key"):
         st.session_state[STATE_API_KEY] = None
-        # Use 'del' to delete the cookie
         if COOKIE_API_KEY in cookies:
             del cookies[COOKIE_API_KEY]
         st.rerun()
@@ -133,6 +182,21 @@ with st.sidebar:
     mode = st.radio("Batch Mode", ["Inline", "File (JSONL)"], disabled=not is_api_key_set)
     job_display_name = st.text_input("Display Name", value="my-gemini-job", disabled=not is_api_key_set)
 
+    st.divider()
+    st.header("📜 Job History")
+    job_history = get_job_history()
+    if job_history:
+        for job_id in job_history:
+            job_short_id = job_id.split('/')[-1]
+            if st.button(f"Load: {job_short_id}", key=job_id, use_container_width=True):
+                st.session_state[STATE_JOB_NAME] = job_id
+                st.session_state[STATE_JOB_STATUS] = None
+                st.session_state[STATE_JOB_RESULTS] = None
+                st.session_state[STATE_LAST_REQUEST] = None
+                st.rerun()
+    else:
+        st.info("No past jobs found.")
+
 # A job is active if its name is in the session state.
 is_job_active = st.session_state[STATE_JOB_NAME] is not None
 
@@ -140,85 +204,78 @@ is_job_active = st.session_state[STATE_JOB_NAME] is not None
 if not is_job_active:
     st.header("✍️ 1. Submit a New Batch Job")
     with st.form("submission_form"):
-
-        # --- DYNAMIC UI FOR INPUT MODE ---
         if mode == "Inline":
             prompt_input = st.text_area("Enter prompts (one per line)", height=250, key="prompt_input_area")
             uploaded_file = None
-        else:  # File (JSONL) mode
+        else:
             uploaded_file = st.file_uploader("Upload a JSONL file", type=["jsonl"])
             prompt_input = None
-
         submitted = st.form_submit_button("🚀 Submit Job", type="primary", disabled=not is_api_key_set)
 
     if submitted:
-        job_started = False
-        # --- UPDATED SUBMISSION LOGIC ---
+        job_function = None
+        job_args = None
+
         if mode == "Inline":
             if prompt_input:
                 prompts = [p.strip() for p in prompt_input.split("\n") if p.strip()]
                 if prompts:
-                    job_started = True
-                    with st.spinner("Submitting inline job..."):
-                        inline_requests = [{'contents': [{'parts': [{'text': p}], 'role': 'user'}]} for p in prompts]
-                        job_function = create_inline_batch_job
-                        job_args = (model, inline_requests, job_display_name)
+                    st.session_state[STATE_LAST_REQUEST] = {"mode": "Inline", "prompts": prompts, "model": model,
+                                                            "name": job_display_name}
+                    inline_requests = [{'contents': [{'parts': [{'text': p}], 'role': 'user'}]} for p in prompts]
+                    job_function = create_inline_batch_job
+                    job_args = (model, inline_requests, job_display_name)
                 else:
-                    st.warning("Please enter at least one prompt in the text area.")
+                    st.warning("Please enter at least one prompt.")
             else:
-                st.warning("Please enter at least one prompt in the text area.")
+                st.warning("Please enter at least one prompt.")
 
         elif mode == "File (JSONL)":
-            if uploaded_file is not None:
-                job_started = True
-                # To handle the uploaded file, we need to save it temporarily
+            if uploaded_file:
                 temp_dir = "temp_uploads"
                 os.makedirs(temp_dir, exist_ok=True)
                 jsonl_path = os.path.join(temp_dir, uploaded_file.name)
                 with open(jsonl_path, "wb") as f:
                     f.write(uploaded_file.getbuffer())
-
-                with st.spinner(f"Submitting job with file: {uploaded_file.name}..."):
-                    job_function = create_file_batch_job
-                    job_args = (model, jsonl_path, job_display_name)
+                st.session_state[STATE_LAST_REQUEST] = {"mode": "File", "path": jsonl_path, "model": model,
+                                                        "name": job_display_name}
+                job_function = create_file_batch_job
+                job_args = (model, jsonl_path, job_display_name)
             else:
                 st.warning("Please upload a JSONL file.")
 
-        if job_started:
-            try:
-                base_wait_time = 2
-                max_retries = 5
-                job = None
-                for i in range(max_retries):
-                    try:
-                        job = job_function(*job_args)
-                        break
-                    except ResourceExhausted as e:
-                        if i < max_retries - 1:
-                            wait_time = (base_wait_time ** i) + random.random()
-                            st.warning(f"Quota limit hit (429). Retrying in {wait_time:.2f} seconds...", icon="⏳")
-                            time.sleep(wait_time)
-                        else:
-                            st.error(f"🚨 API Error: Quota limit hit and max retries exceeded. {e}", icon="🔥")
-                            raise e
-                if job:
-                    st.session_state[STATE_JOB_NAME] = job.name
-                    st.session_state[STATE_JOB_STATUS] = job.state.name
-                    cookies[COOKIE_JOB_NAME] = job.name
-                    st.rerun()
-            except (GoogleAPICallError, Exception) as e:
-                st.error(f"🚨 Critical Error: Failed to submit job. {e}", icon="🔥")
-            finally:
-                # Clean up the temporary file if it was created
-                if mode == "File (JSONL)" and 'jsonl_path' in locals() and os.path.exists(jsonl_path):
-                    os.remove(jsonl_path)
+        if job_function and job_args:
+            with st.spinner("Submitting job..."):
+                try:
+                    base_wait_time = 2
+                    max_retries = 5
+                    job = None
+                    for i in range(max_retries):
+                        try:
+                            job = job_function(*job_args)
+                            break
+                        except ResourceExhausted as e:
+                            if i < max_retries - 1:
+                                wait_time = (base_wait_time ** i) + random.random()
+                                st.warning(f"Quota limit hit (429). Retrying in {wait_time:.2f} seconds...", icon="⏳")
+                                time.sleep(wait_time)
+                            else:
+                                st.error(f"🚨 API Error: Quota limit hit and max retries exceeded. {e}", icon="🔥")
+                                raise e
+                    if job:
+                        st.session_state[STATE_JOB_NAME] = job.name
+                        st.session_state[STATE_JOB_STATUS] = job.state.name
+                        add_to_job_history(job.name)
+                        st.rerun()
+                except (GoogleAPICallError, Exception) as e:
+                    st.error(f"🚨 Critical Error: Failed to submit job. {e}", icon="🔥")
 
 # --- SECTION 2: Job Monitoring & Management ---
 if is_job_active:
     st.header("⏳ 2. Monitor Active Job")
     st.info(f"**Job Name:** `{st.session_state[STATE_JOB_NAME]}`")
 
-    if st.session_state[STATE_JOB_STATUS] not in TERMINAL_STATES:
+    if st.session_state.get(STATE_JOB_STATUS) not in TERMINAL_STATES:
         if st.button("🔄 Refresh Job Status"):
             with st.spinner("Polling status..."):
                 try:
@@ -239,6 +296,8 @@ if is_job_active:
     if final_status == "JOB_STATE_SUCCEEDED":
         st.success("Job completed successfully.")
         if st.session_state.get(STATE_JOB_RESULTS):
+            generate_local_summary(st.session_state[STATE_JOB_RESULTS])
+
             results_json_string = json.dumps([json.loads(res) for res in st.session_state[STATE_JOB_RESULTS]], indent=2)
             st.download_button(
                 label="⬇️ Download Full Results (JSON)",
@@ -253,14 +312,26 @@ if is_job_active:
                 "Number of results to preview:",
                 min_value=1,
                 max_value=len(st.session_state[STATE_JOB_RESULTS]),
-                value=min(50, len(st.session_state[STATE_JOB_RESULTS])),  # Default to 50 or total results if less
+                value=min(50, len(st.session_state[STATE_JOB_RESULTS])),
                 step=10
             )
-
             display_job_output(st.session_state[STATE_JOB_RESULTS], preview_limit=preview_count)
-    elif final_status in ["JOB_STATE_FAILED", "JOB_STATE_CANCELLED"]:
-        st.error("Job did not complete successfully.") if final_status == "JOB_STATE_FAILED" else st.warning(
-            "Job was cancelled.")
+
+    elif final_status == "JOB_STATE_FAILED":
+        st.error("Job failed.")
+        if st.session_state.get(STATE_LAST_REQUEST):
+            if st.button("🔁 Retry Job", type="primary"):
+                last_request = st.session_state[STATE_LAST_REQUEST]
+                reset_app_state()
+                # Use the stored request to resubmit
+                if last_request["mode"] == "Inline":
+                    st.session_state.submitted_prompts = last_request["prompts"]
+                else:  # File mode
+                    st.session_state.submitted_file_path = last_request["path"]
+                st.rerun()  # This will trigger the submission logic again
+
+    elif final_status == "JOB_STATE_CANCELLED":
+        st.warning("Job was cancelled.")
 
     st.divider()
     st.header("⚙️ 3. Manage Job")
