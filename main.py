@@ -51,12 +51,18 @@ if not st.session_state[STATE_JOB_NAME] and (previous_job := cookies.get(COOKIE_
 
 
 # --- Helper Functions ---
-def display_job_output(results_str):
-    """Parses and neatly displays the results from a batch job."""
-    st.subheader("✅ Job Results")
+def display_job_output(results_str, preview_limit=50):
+    """Parses and neatly displays a preview of the results from a batch job."""
+    st.subheader("✅ Job Results Preview")
     try:
         results_list = [json.loads(res) for res in results_str]
-        for i, res_json in enumerate(results_list):
+        total_results = len(results_list)
+
+        if total_results > preview_limit:
+            st.info(
+                f"Displaying the first {preview_limit} of {total_results} total results. Use the download button for the full output.")
+
+        for i, res_json in enumerate(results_list[:preview_limit]):
             with st.expander(f"**Response for Request {i + 1}**", expanded=True):
                 text_content = \
                     res_json.get('response', {}).get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[
@@ -71,7 +77,8 @@ def display_job_output(results_str):
 
 def reset_app_state():
     """Fully resets the application state and cookies."""
-    del cookies[COOKIE_JOB_NAME]
+    if COOKIE_JOB_NAME in cookies:
+        del cookies[COOKIE_JOB_NAME]
     for key in [STATE_JOB_NAME, STATE_JOB_STATUS, STATE_JOB_RESULTS]:
         st.session_state[key] = None
     st.toast("Application has been reset.")
@@ -98,13 +105,13 @@ with st.sidebar:
 
     if user_api_key_input != st.session_state.get(STATE_API_KEY):
         st.session_state[STATE_API_KEY] = user_api_key_input
-        # FIX: Use dictionary-style assignment to set the cookie
+        # Use dictionary-style assignment to set the cookie
         cookies[COOKIE_API_KEY] = user_api_key_input
         st.rerun()
 
     if st.button("Clear & Forget API Key"):
         st.session_state[STATE_API_KEY] = None
-        # FIX: Use 'del' to delete the cookie
+        # Use 'del' to delete the cookie
         if COOKIE_API_KEY in cookies:
             del cookies[COOKIE_API_KEY]
         st.rerun()
@@ -234,14 +241,23 @@ if is_job_active:
         if st.session_state.get(STATE_JOB_RESULTS):
             results_json_string = json.dumps([json.loads(res) for res in st.session_state[STATE_JOB_RESULTS]], indent=2)
             st.download_button(
-                label="⬇️ Download Results (JSON)",
+                label="⬇️ Download Full Results (JSON)",
                 data=results_json_string,
                 file_name=f"gemini_batch_results_{st.session_state[STATE_JOB_NAME].split('/')[-1]}.json",
                 mime="application/json",
                 type="primary"
             )
             st.divider()
-            display_job_output(st.session_state[STATE_JOB_RESULTS])
+
+            preview_count = st.number_input(
+                "Number of results to preview:",
+                min_value=1,
+                max_value=len(st.session_state[STATE_JOB_RESULTS]),
+                value=min(50, len(st.session_state[STATE_JOB_RESULTS])),  # Default to 50 or total results if less
+                step=10
+            )
+
+            display_job_output(st.session_state[STATE_JOB_RESULTS], preview_limit=preview_count)
     elif final_status in ["JOB_STATE_FAILED", "JOB_STATE_CANCELLED"]:
         st.error("Job did not complete successfully.") if final_status == "JOB_STATE_FAILED" else st.warning(
             "Job was cancelled.")
