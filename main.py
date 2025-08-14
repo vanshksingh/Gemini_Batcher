@@ -4,15 +4,14 @@ import json
 import os
 import datetime
 import random
-import streamlit_cookies_manager
-from google.api_core.exceptions import GoogleAPICallError, ResourceExhausted
 
 # --- Page and State Configuration ---
 # This MUST be the first Streamlit command in your script.
 st.set_page_config(page_title="Gemini Batch Runner Pro", layout="wide", initial_sidebar_state="expanded")
 
-# This is a placeholder for your actual batch handler functions.
-# You need a 'batch_handler.py' file in the same directory.
+# Import third-party and local modules AFTER page config
+import streamlit_cookies_manager
+from google.api_core.exceptions import GoogleAPICallError, ResourceExhausted
 from batch_handler import (
     initialize_client,
     create_inline_batch_job,
@@ -72,7 +71,7 @@ def display_job_output(results_str):
 
 def reset_app_state():
     """Fully resets the application state and cookies."""
-    cookies.delete(COOKIE_JOB_NAME)
+    del cookies[COOKIE_JOB_NAME]
     for key in [STATE_JOB_NAME, STATE_JOB_STATUS, STATE_JOB_RESULTS]:
         st.session_state[key] = None
     st.toast("Application has been reset.")
@@ -99,13 +98,15 @@ with st.sidebar:
 
     if user_api_key_input != st.session_state.get(STATE_API_KEY):
         st.session_state[STATE_API_KEY] = user_api_key_input
-        cookies.set(COOKIE_API_KEY, user_api_key_input,
-                    expires_at=datetime.datetime.now() + datetime.timedelta(days=30))
+        # FIX: Use dictionary-style assignment to set the cookie
+        cookies[COOKIE_API_KEY] = user_api_key_input
         st.rerun()
 
     if st.button("Clear & Forget API Key"):
         st.session_state[STATE_API_KEY] = None
-        cookies.delete(COOKIE_API_KEY)
+        # FIX: Use 'del' to delete the cookie
+        if COOKIE_API_KEY in cookies:
+            del cookies[COOKIE_API_KEY]
         st.rerun()
 
     is_api_key_set = False
@@ -196,8 +197,7 @@ if not is_job_active:
                 if job:
                     st.session_state[STATE_JOB_NAME] = job.name
                     st.session_state[STATE_JOB_STATUS] = job.state.name
-                    cookies.set(COOKIE_JOB_NAME, job.name,
-                                expires_at=datetime.datetime.now() + datetime.timedelta(days=7))
+                    cookies[COOKIE_JOB_NAME] = job.name
                     st.rerun()
             except (GoogleAPICallError, Exception) as e:
                 st.error(f"🚨 Critical Error: Failed to submit job. {e}", icon="🔥")
