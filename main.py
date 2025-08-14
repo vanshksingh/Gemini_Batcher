@@ -25,7 +25,7 @@ from batch_handler import (
 
 # Constants for session state keys for cleaner access
 COOKIE_JOB_NAME = "gemini_batch_job_name"
-COOKIE_API_KEY = "gemini_api_key" # New cookie for the API key
+COOKIE_API_KEY = "gemini_api_key"  # New cookie for the API key
 STATE_JOB_NAME = "job_name"
 STATE_JOB_STATUS = "job_status"
 STATE_JOB_RESULTS = "job_results"
@@ -50,6 +50,7 @@ if not st.session_state[STATE_JOB_NAME] and (previous_job := cookies.get(COOKIE_
     st.session_state[STATE_JOB_NAME] = previous_job
     st.toast(f"Restored monitoring for job: {previous_job}")
 
+
 # --- Helper Functions ---
 def display_job_output(results_str):
     """Parses and neatly displays the results from a batch job."""
@@ -68,6 +69,7 @@ def display_job_output(results_str):
         st.error(f"Could not parse results. Error: {e}")
         st.code(str(results_str), language='json')
 
+
 def reset_app_state():
     """Fully resets the application state and cookies."""
     cookies.delete(COOKIE_JOB_NAME)
@@ -75,6 +77,7 @@ def reset_app_state():
         st.session_state[key] = None
     st.toast("Application has been reset.")
     st.rerun()
+
 
 # --- Main App UI ---
 st.title("📦 Gemini Batch Runner Pro")
@@ -96,7 +99,8 @@ with st.sidebar:
 
     if user_api_key_input != st.session_state.get(STATE_API_KEY):
         st.session_state[STATE_API_KEY] = user_api_key_input
-        cookies.set(COOKIE_API_KEY, user_api_key_input, expires_at=datetime.datetime.now() + datetime.timedelta(days=30))
+        cookies.set(COOKIE_API_KEY, user_api_key_input,
+                    expires_at=datetime.datetime.now() + datetime.timedelta(days=30))
         st.rerun()
 
     if st.button("Clear & Forget API Key"):
@@ -128,51 +132,79 @@ is_job_active = st.session_state[STATE_JOB_NAME] is not None
 if not is_job_active:
     st.header("✍️ 1. Submit a New Batch Job")
     with st.form("submission_form"):
-        prompt_input = st.text_area("Enter prompts (one per line)", height=250, key="prompt_input_area")
+
+        # --- DYNAMIC UI FOR INPUT MODE ---
+        if mode == "Inline":
+            prompt_input = st.text_area("Enter prompts (one per line)", height=250, key="prompt_input_area")
+            uploaded_file = None
+        else:  # File (JSONL) mode
+            uploaded_file = st.file_uploader("Upload a JSONL file", type=["jsonl"])
+            prompt_input = None
+
         submitted = st.form_submit_button("🚀 Submit Job", type="primary", disabled=not is_api_key_set)
 
     if submitted:
-        prompts = [p.strip() for p in prompt_input.split("\n") if p.strip()]
-        if not prompts:
-            st.warning("Please enter at least one prompt.")
-        else:
-            with st.spinner("Submitting job..."):
-                try:
-                    base_wait_time = 2
-                    max_retries = 5
-                    job = None
-                    for i in range(max_retries):
-                        try:
-                            if mode == "Inline":
-                                inline_requests = [{'contents': [{'parts': [{'text': p}], 'role': 'user'}]} for p in prompts]
-                                job = create_inline_batch_job(model, inline_requests, job_display_name)
-                            else:
-                                jsonl_path = "temp_batch.jsonl"
-                                try:
-                                    with open(jsonl_path, "w") as f:
-                                        for i, p in enumerate(prompts):
-                                            obj = {"custom_id": f"request-{i + 1}", "request": {"contents": [{"parts": [{"text": p}]}]}}
-                                            f.write(json.dumps(obj) + "\n")
-                                    job = create_file_batch_job(model, jsonl_path, job_display_name)
-                                finally:
-                                    if os.path.exists(jsonl_path):
-                                        os.remove(jsonl_path)
-                            break
-                        except ResourceExhausted as e:
-                            if i < max_retries - 1:
-                                wait_time = (base_wait_time ** i) + random.random()
-                                st.warning(f"Quota limit hit (429). Retrying in {wait_time:.2f} seconds...", icon="⏳")
-                                time.sleep(wait_time)
-                            else:
-                                st.error(f"🚨 API Error: Quota limit hit and max retries exceeded. {e}", icon="🔥")
-                                raise e
-                    if job:
-                        st.session_state[STATE_JOB_NAME] = job.name
-                        st.session_state[STATE_JOB_STATUS] = job.state.name
-                        cookies.set(COOKIE_JOB_NAME, job.name, expires_at=datetime.datetime.now() + datetime.timedelta(days=7))
-                        st.rerun()
-                except (GoogleAPICallError, Exception) as e:
-                    st.error(f"🚨 Critical Error: Failed to submit job. {e}", icon="🔥")
+        job_started = False
+        # --- UPDATED SUBMISSION LOGIC ---
+        if mode == "Inline":
+            if prompt_input:
+                prompts = [p.strip() for p in prompt_input.split("\n") if p.strip()]
+                if prompts:
+                    job_started = True
+                    with st.spinner("Submitting inline job..."):
+                        inline_requests = [{'contents': [{'parts': [{'text': p}], 'role': 'user'}]} for p in prompts]
+                        job_function = create_inline_batch_job
+                        job_args = (model, inline_requests, job_display_name)
+                else:
+                    st.warning("Please enter at least one prompt in the text area.")
+            else:
+                st.warning("Please enter at least one prompt in the text area.")
+
+        elif mode == "File (JSONL)":
+            if uploaded_file is not None:
+                job_started = True
+                # To handle the uploaded file, we need to save it temporarily
+                temp_dir = "temp_uploads"
+                os.makedirs(temp_dir, exist_ok=True)
+                jsonl_path = os.path.join(temp_dir, uploaded_file.name)
+                with open(jsonl_path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+
+                with st.spinner(f"Submitting job with file: {uploaded_file.name}..."):
+                    job_function = create_file_batch_job
+                    job_args = (model, jsonl_path, job_display_name)
+            else:
+                st.warning("Please upload a JSONL file.")
+
+        if job_started:
+            try:
+                base_wait_time = 2
+                max_retries = 5
+                job = None
+                for i in range(max_retries):
+                    try:
+                        job = job_function(*job_args)
+                        break
+                    except ResourceExhausted as e:
+                        if i < max_retries - 1:
+                            wait_time = (base_wait_time ** i) + random.random()
+                            st.warning(f"Quota limit hit (429). Retrying in {wait_time:.2f} seconds...", icon="⏳")
+                            time.sleep(wait_time)
+                        else:
+                            st.error(f"🚨 API Error: Quota limit hit and max retries exceeded. {e}", icon="🔥")
+                            raise e
+                if job:
+                    st.session_state[STATE_JOB_NAME] = job.name
+                    st.session_state[STATE_JOB_STATUS] = job.state.name
+                    cookies.set(COOKIE_JOB_NAME, job.name,
+                                expires_at=datetime.datetime.now() + datetime.timedelta(days=7))
+                    st.rerun()
+            except (GoogleAPICallError, Exception) as e:
+                st.error(f"🚨 Critical Error: Failed to submit job. {e}", icon="🔥")
+            finally:
+                # Clean up the temporary file if it was created
+                if mode == "File (JSONL)" and 'jsonl_path' in locals() and os.path.exists(jsonl_path):
+                    os.remove(jsonl_path)
 
 # --- SECTION 2: Job Monitoring & Management ---
 if is_job_active:
@@ -186,7 +218,8 @@ if is_job_active:
                     job = poll_batch_job_status(st.session_state[STATE_JOB_NAME])
                     st.session_state[STATE_JOB_STATUS] = job.state.name
                     if st.session_state[STATE_JOB_STATUS] == "JOB_STATE_SUCCEEDED":
-                        st.session_state[STATE_JOB_RESULTS] = retrieve_batch_job_results(st.session_state[STATE_JOB_NAME])
+                        st.session_state[STATE_JOB_RESULTS] = retrieve_batch_job_results(
+                            st.session_state[STATE_JOB_NAME])
                     st.rerun()
                 except Exception as e:
                     st.error(f"🚨 API Error while polling: {e}", icon="🔥")
@@ -210,7 +243,8 @@ if is_job_active:
             st.divider()
             display_job_output(st.session_state[STATE_JOB_RESULTS])
     elif final_status in ["JOB_STATE_FAILED", "JOB_STATE_CANCELLED"]:
-        st.error("Job did not complete successfully.") if final_status == "JOB_STATE_FAILED" else st.warning("Job was cancelled.")
+        st.error("Job did not complete successfully.") if final_status == "JOB_STATE_FAILED" else st.warning(
+            "Job was cancelled.")
 
     st.divider()
     st.header("⚙️ 3. Manage Job")
