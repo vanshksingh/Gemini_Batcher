@@ -24,7 +24,8 @@ from batch_handler import (
 )
 
 # Constants for session state keys for cleaner access
-COOKIE_NAME = "gemini_batch_job_name"
+COOKIE_JOB_NAME = "gemini_batch_job_name"
+COOKIE_API_KEY = "gemini_api_key" # New cookie for the API key
 STATE_JOB_NAME = "job_name"
 STATE_JOB_STATUS = "job_status"
 STATE_JOB_RESULTS = "job_results"
@@ -34,6 +35,10 @@ TERMINAL_STATES = ["JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED", "JOB_STATE_CANCELL
 # --- Cookie and Session State Initialization ---
 # This now comes AFTER st.set_page_config()
 cookies = streamlit_cookies_manager.CookieManager()
+if not cookies.ready():
+    # Wait for the frontend to send cookies to the backend.
+    st.spinner()
+    st.stop()
 
 # Initialize all session state keys to prevent errors
 for key in [STATE_JOB_NAME, STATE_JOB_STATUS, STATE_JOB_RESULTS, STATE_API_KEY]:
@@ -41,27 +46,21 @@ for key in [STATE_JOB_NAME, STATE_JOB_STATUS, STATE_JOB_RESULTS, STATE_API_KEY]:
         st.session_state[key] = None
 
 # Restore job name from cookie on first load
-if not st.session_state[STATE_JOB_NAME] and (previous_job := cookies.get(COOKIE_NAME)):
+if not st.session_state[STATE_JOB_NAME] and (previous_job := cookies.get(COOKIE_JOB_NAME)):
     st.session_state[STATE_JOB_NAME] = previous_job
     st.toast(f"Restored monitoring for job: {previous_job}")
-
 
 # --- Helper Functions ---
 def display_job_output(results_str):
     """Parses and neatly displays the results from a batch job."""
     st.subheader("✅ Job Results")
     try:
-        # The result from the API is a list of JSON strings, so we parse each one.
         results_list = [json.loads(res) for res in results_str]
-
-        # Display each result in an expander
         for i, res_json in enumerate(results_list):
             with st.expander(f"**Response for Request {i + 1}**", expanded=True):
-                # Extract and display the actual generated text.
                 text_content = \
                     res_json.get('response', {}).get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[
-                        0].get(
-                        'text', 'No text content found.')
+                        0].get('text', 'No text content found.')
                 st.markdown(text_content)
                 with st.popover("View Raw JSON"):
                     st.json(res_json)
@@ -69,15 +68,13 @@ def display_job_output(results_str):
         st.error(f"Could not parse results. Error: {e}")
         st.code(str(results_str), language='json')
 
-
 def reset_app_state():
     """Fully resets the application state and cookies."""
-    cookies.delete(COOKIE_NAME)
+    cookies.delete(COOKIE_JOB_NAME)
     for key in [STATE_JOB_NAME, STATE_JOB_STATUS, STATE_JOB_RESULTS]:
         st.session_state[key] = None
     st.toast("Application has been reset.")
     st.rerun()
-
 
 # --- Main App UI ---
 st.title("📦 Gemini Batch Runner Pro")
@@ -87,31 +84,26 @@ with st.sidebar:
     st.header("🛠️ Configuration")
     st.subheader("API Key")
 
-    # Try to load from secrets only if the key isn't already in the session state
+    # Load API key from cookies if not in session state
     if not st.session_state.get(STATE_API_KEY):
-        try:
-            st.session_state[STATE_API_KEY] = st.secrets["GEMINI_API_KEY"]
-            st.success("API Key loaded from secrets.", icon="✅")
-        except (FileNotFoundError, KeyError):
-            st.info("No API Key found in secrets. Please provide one below.")
+        st.session_state[STATE_API_KEY] = cookies.get(COOKIE_API_KEY)
 
-    # Get API key from user input, using the session state value as the default
     user_api_key_input = st.text_input(
         "Enter your Gemini API Key",
         type="password",
         value=st.session_state.get(STATE_API_KEY, "")
     )
 
-    # If the user input differs from the session state, update it and rerun
     if user_api_key_input != st.session_state.get(STATE_API_KEY):
         st.session_state[STATE_API_KEY] = user_api_key_input
+        cookies.set(COOKIE_API_KEY, user_api_key_input, expires_at=datetime.datetime.now() + datetime.timedelta(days=30))
         st.rerun()
 
-    if st.button("Clear Key"):
+    if st.button("Clear & Forget API Key"):
         st.session_state[STATE_API_KEY] = None
+        cookies.delete(COOKIE_API_KEY)
         st.rerun()
 
-    # On every script run, initialize the client if an API key is available
     is_api_key_set = False
     if st.session_state.get(STATE_API_KEY):
         try:
@@ -146,29 +138,26 @@ if not is_job_active:
         else:
             with st.spinner("Submitting job..."):
                 try:
-                    # --- Exponential Backoff Logic ---
                     base_wait_time = 2
                     max_retries = 5
                     job = None
                     for i in range(max_retries):
                         try:
                             if mode == "Inline":
-                                inline_requests = [{'contents': [{'parts': [{'text': p}], 'role': 'user'}]} for p in
-                                                   prompts]
+                                inline_requests = [{'contents': [{'parts': [{'text': p}], 'role': 'user'}]} for p in prompts]
                                 job = create_inline_batch_job(model, inline_requests, job_display_name)
-                            else:  # File mode
+                            else:
                                 jsonl_path = "temp_batch.jsonl"
                                 try:
                                     with open(jsonl_path, "w") as f:
                                         for i, p in enumerate(prompts):
-                                            obj = {"custom_id": f"request-{i + 1}",
-                                                   "request": {"contents": [{"parts": [{"text": p}]}]}}
+                                            obj = {"custom_id": f"request-{i + 1}", "request": {"contents": [{"parts": [{"text": p}]}]}}
                                             f.write(json.dumps(obj) + "\n")
                                     job = create_file_batch_job(model, jsonl_path, job_display_name)
                                 finally:
                                     if os.path.exists(jsonl_path):
                                         os.remove(jsonl_path)
-                            break  # If successful, break the retry loop
+                            break
                         except ResourceExhausted as e:
                             if i < max_retries - 1:
                                 wait_time = (base_wait_time ** i) + random.random()
@@ -180,8 +169,7 @@ if not is_job_active:
                     if job:
                         st.session_state[STATE_JOB_NAME] = job.name
                         st.session_state[STATE_JOB_STATUS] = job.state.name
-                        cookies.set(COOKIE_NAME, job.name,
-                                    expires_at=datetime.datetime.now() + datetime.timedelta(days=7))
+                        cookies.set(COOKIE_JOB_NAME, job.name, expires_at=datetime.datetime.now() + datetime.timedelta(days=7))
                         st.rerun()
                 except (GoogleAPICallError, Exception) as e:
                     st.error(f"🚨 Critical Error: Failed to submit job. {e}", icon="🔥")
@@ -191,7 +179,6 @@ if is_job_active:
     st.header("⏳ 2. Monitor Active Job")
     st.info(f"**Job Name:** `{st.session_state[STATE_JOB_NAME]}`")
 
-    # --- Manual Polling Section ---
     if st.session_state[STATE_JOB_STATUS] not in TERMINAL_STATES:
         if st.button("🔄 Refresh Job Status"):
             with st.spinner("Polling status..."):
@@ -199,21 +186,15 @@ if is_job_active:
                     job = poll_batch_job_status(st.session_state[STATE_JOB_NAME])
                     st.session_state[STATE_JOB_STATUS] = job.state.name
                     if st.session_state[STATE_JOB_STATUS] == "JOB_STATE_SUCCEEDED":
-                        st.session_state[STATE_JOB_RESULTS] = retrieve_batch_job_results(
-                            st.session_state[STATE_JOB_NAME])
+                        st.session_state[STATE_JOB_RESULTS] = retrieve_batch_job_results(st.session_state[STATE_JOB_NAME])
                     st.rerun()
                 except Exception as e:
                     st.error(f"🚨 API Error while polling: {e}", icon="🔥")
                     st.session_state[STATE_JOB_STATUS] = "JOB_STATE_FAILED"
                     st.rerun()
 
-    # --- Display Final Status, Results, and Actions ---
     final_status = st.session_state.get(STATE_JOB_STATUS, "UNKNOWN")
-
-    # Use columns for a cleaner layout
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        st.metric("Current Status", final_status)
+    st.metric("Current Status", final_status)
 
     if final_status == "JOB_STATE_SUCCEEDED":
         st.success("Job completed successfully.")
@@ -229,8 +210,7 @@ if is_job_active:
             st.divider()
             display_job_output(st.session_state[STATE_JOB_RESULTS])
     elif final_status in ["JOB_STATE_FAILED", "JOB_STATE_CANCELLED"]:
-        st.error("Job did not complete successfully.") if final_status == "JOB_STATE_FAILED" else st.warning(
-            "Job was cancelled.")
+        st.error("Job did not complete successfully.") if final_status == "JOB_STATE_FAILED" else st.warning("Job was cancelled.")
 
     st.divider()
     st.header("⚙️ 3. Manage Job")
