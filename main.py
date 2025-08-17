@@ -14,7 +14,6 @@ st.set_page_config(
 from dotenv import load_dotenv
 from google.api_core.exceptions import GoogleAPIError, GoogleAPICallError, ResourceExhausted
 
-# Cookie managers
 from streamlit_cookies_manager import EncryptedCookieManager
 from streamlit_cookies_manager import CookieManager as PlainCookieManager
 
@@ -32,6 +31,11 @@ STATE_API_KEY = "api_key"
 STATE_LAST_REQUEST = "last_request"
 STATE_CACHE_NAME = "cache_name"             # explicit cache name
 STATE_IMPLICIT_PREFIX = "implicit_prefix"   # implicit shared prefix
+STATE_CTX_MODE = "ctx_mode"                 # None | Implicit shared prefix | Explicit cache
+
+# Regular mode state
+STATE_REGULAR_RESULTS = "regular_results"
+STATE_REGULAR_USAGE = "regular_usage"
 
 TERMINAL_STATES = {
     "JOB_STATE_SUCCEEDED",
@@ -59,7 +63,7 @@ def _to_jsonl_blob(lines: list[str]) -> str:
     return "\n".join(lines)
 
 
-# ---------- Common result parsing ----------
+# ---------- Common result parsing for batch-only consolidated file ----------
 def _extract_best_text_from_obj(obj: dict) -> str | None:
     resp = obj.get("response")
     if isinstance(resp, dict):
@@ -120,6 +124,45 @@ def _extract_texts_for_report(lines: list[str]) -> str:
     return "\n".join(chunks).strip()
 
 
+def _regular_report_and_txt(results: list[dict], usage: dict, implicit_prefix: str | None) -> tuple[str, str]:
+    """Build (report_text, combined_txt_with_QA) for regular mode."""
+    inp = int(usage.get("input_tokens", 0))
+    out = int(usage.get("output_tokens", 0))
+    total = int(usage.get("total_tokens", inp + out))
+    cached_in = int(usage.get("cached_input_tokens", 0))
+    billed = usage.get("billed_tokens")
+    billed_line = f"- Billable tokens (reported): {int(billed)}\n" if isinstance(billed, int) else ""
+    savings_line = f"- Cached input tokens (reported): {cached_in}\n" if cached_in > 0 else "- Cached input tokens: (not reported by API)\n"
+    prefix_note = f"- Implicit shared prefix used: {bool(implicit_prefix)}\n"
+
+    report = (
+        "=== Usage Report (Regular Mode) ===\n"
+        f"- Total prompts: {len(results)}\n"
+        f"- Input tokens (sum): {inp}\n"
+        f"- Output tokens (sum): {out}\n"
+        f"- Total tokens (sum): {total}\n"
+        f"{savings_line}"
+        f"{billed_line}"
+        f"{prefix_note}"
+        "Note: Cache savings are estimated based on fields exposed by the API. "
+        "If fields are missing, the API did not provide them for this run.\n"
+    )
+
+    chunks = ["=== Q&A Pairs ==="]
+    for i, item in enumerate(results, 1):
+        q = item.get("prompt", "")
+        a = (item.get("text") or "").strip()
+        err = item.get("error")
+        chunks.append(f"\n--- #{i} ---\nQ:\n{q}\n")
+        if err:
+            chunks.append(f"A:\n[ERROR] {err}\n")
+        else:
+            chunks.append(f"A:\n{a}\n")
+
+    combined_txt = report + "\n" + "\n".join(chunks)
+    return report, combined_txt
+
+
 # ---------------- Cookies ----------------
 def get_cookie_manager():
     secret = os.getenv("COOKIE_SECRET")
@@ -142,6 +185,9 @@ def init_state():
         STATE_LAST_REQUEST,
         STATE_CACHE_NAME,
         STATE_IMPLICIT_PREFIX,
+        STATE_CTX_MODE,
+        STATE_REGULAR_RESULTS,
+        STATE_REGULAR_USAGE,
     ]:
         st.session_state.setdefault(k, None)
 
@@ -187,65 +233,12 @@ def reset_app_state(cookies, clear_history=False):
     if st.session_state.get(STATE_JOB_NAME):
         clear_history_item(cookies, st.session_state[STATE_JOB_NAME])
 
-    for k in [STATE_JOB_NAME, STATE_JOB_STATUS, STATE_JOB_RESULTS, STATE_LAST_REQUEST]:
+    for k in [STATE_JOB_NAME, STATE_JOB_STATUS, STATE_JOB_RESULTS, STATE_LAST_REQUEST,
+              STATE_REGULAR_RESULTS, STATE_REGULAR_USAGE]:
         st.session_state[k] = None
 
     st.toast("Application state cleared.")
     st.rerun()
-
-
-# ---------------- UI Helpers ----------------
-def display_job_output(results_str_list, preview_limit=50):
-    st.subheader("✅ Job Results Preview")
-    total_results = len(results_str_list)
-    if total_results > preview_limit:
-        st.info(f"Showing first {preview_limit} of {total_results}. Use download for full output.")
-    for i, line in enumerate(results_str_list[:preview_limit]):
-        line = (line or "").strip()
-        try:
-            res_json = json.loads(line)
-        except json.JSONDecodeError:
-            res_json = {"raw": line}
-        with st.expander(f"Response {i+1}", expanded=False):
-            text_content = _extract_best_text_from_obj(res_json)
-            if text_content:
-                st.markdown(text_content)
-            else:
-                st.caption("No simple text found; see raw JSON below.")
-            with st.popover("View JSON"):
-                st.json(res_json)
-
-
-def generate_local_summary(results_str_list):
-    st.subheader("📊 Results Summary")
-    total = len(results_str_list)
-    errors = 0
-    refusals = 0
-    refusal_keywords = ("cannot", "unable", "sorry", "i am not able")
-
-    for line in results_str_list:
-        line = (line or "").strip()
-        try:
-            res = json.loads(line)
-        except json.JSONDecodeError:
-            errors += 1
-            continue
-        if "error" in res and not res.get("response"):
-            errors += 1
-            continue
-        text = _extract_best_text_from_obj(res) or ""
-        if not text.strip():
-            errors += 1
-        elif any(k in text.lower() for k in refusal_keywords):
-            refusals += 1
-
-    success = max(0, total - errors - refusals)
-    st.markdown(
-        f"- **Total Responses:** {total}\n"
-        f"- **Successful Responses:** {success}\n"
-        f"- **Content Refusals:** {refusals}\n"
-        f"- **Errors/Empty Responses:** {errors}"
-    )
 
 
 # ---------------- Main App ----------------
@@ -310,22 +303,39 @@ def run_app():
         st.divider()
         model = st.selectbox("Model", DEFAULT_MODELS, index=0, disabled=not is_api_key_set)
 
-        # Batch Mode with helper icon
+        # Run Mode selector: Batch vs Regular
+        run_mode = st.radio(
+            "Run Mode",
+            ["Batch", "Regular"],
+            help="Choose Batch for asynchronous large jobs at 50% cost, or Regular for immediate, per-prompt calls.",
+        )
+
+        # For Batch only: Batch Mode selector + helper
         batch_mode_help = (
             "Inline → pass a small list of requests directly in the API call (quick tests, ≤~20MB total).\n\n"
             "File (JSONL) → upload a .jsonl file with hundreds/thousands of requests (up to 2GB). "
             "Results come back as a downloadable JSONL file."
         )
-        mode = st.radio(
-            "Batch Mode",
-            ["Inline", "File (JSONL)"],
-            disabled=not is_api_key_set,
-            help=batch_mode_help,
+        if run_mode == "Batch":
+            mode = st.radio(
+                "Batch Mode",
+                ["Inline", "File (JSONL)"],
+                disabled=not is_api_key_set,
+                help=batch_mode_help,
+            )
+        else:
+            mode = None  # not used
+
+        # Display Name (used for Batch jobs)
+        job_display_name = st.text_input(
+            "Display Name",
+            value="my-gemini-job",
+            disabled=(not is_api_key_set or run_mode != "Batch")
         )
 
-        # ---- NEW: Context block ----
+        # Context mode selector (sidebar ONLY the selector)
         st.divider()
-        st.header("🧠 Context (optional)")
+        st.header("🧠 Context Mode")
         ctx_choice = st.radio(
             "How to add context?",
             ["None", "Implicit shared prefix", "Explicit cache"],
@@ -335,63 +345,9 @@ def run_app():
                 "Explicit: We create a cached context once (with TTL) and reference it from each request."
             ),
         )
+        st.session_state[STATE_CTX_MODE] = ctx_choice
 
-        if ctx_choice == "Implicit shared prefix":
-            st.session_state[STATE_CACHE_NAME] = None
-            st.session_state[STATE_IMPLICIT_PREFIX] = st.text_area(
-                "Shared prefix (prepended to every request):",
-                height=160,
-                help="Place large/common instructions or background here to maximize implicit cache hits.",
-            )
-
-        elif ctx_choice == "Explicit cache":
-            st.session_state[STATE_IMPLICIT_PREFIX] = None
-            with st.form("explicit_cache_form", clear_on_submit=False):
-                context_text = st.text_area(
-                    "Cache this context once (used by all requests):",
-                    height=200,
-                    help="Long instructions, docs, code, etc. This is stored on the server and referenced by name.",
-                )
-                ttl_minutes = st.number_input(
-                    "TTL (minutes)", min_value=1, max_value=24 * 60, value=60,
-                    help="Cache expires automatically after TTL."
-                )
-                sys_instructions = st.text_area(
-                    "Optional system instruction (developer message):",
-                    height=100,
-                )
-                make_cache = st.form_submit_button("Create / Refresh Cache", type="primary")
-
-            if make_cache:
-                try:
-                    cache = bh.create_context_cache(
-                        model=model,
-                        context_text=context_text or "",
-                        ttl_seconds=int(ttl_minutes) * 60,
-                        display_name="gem-batch-cache",
-                        system_instruction=sys_instructions or None,
-                    )
-                    st.session_state[STATE_CACHE_NAME] = cache.name
-                    st.success(f"Cache ready: {cache.name}")
-                except Exception as e:
-                    st.error(f"Failed to create cache: {e}")
-
-            if st.session_state.get(STATE_CACHE_NAME):
-                cols = st.columns(2)
-                cols[0].info(f"Active cache: `{st.session_state[STATE_CACHE_NAME]}`")
-                if cols[1].button("Delete Cache"):
-                    try:
-                        bh.delete_context_cache(st.session_state[STATE_CACHE_NAME])
-                        st.session_state[STATE_CACHE_NAME] = None
-                        st.toast("Cache deleted.")
-                    except Exception as e:
-                        st.error(f"Failed to delete cache: {e}")
-
-        else:
-            # None
-            st.session_state[STATE_CACHE_NAME] = None
-            st.session_state[STATE_IMPLICIT_PREFIX] = None
-
+        # Job history (Batch only)
         st.divider()
         st.header("📜 Job History")
         job_history = get_job_history(cookies)
@@ -407,10 +363,155 @@ def run_app():
         else:
             st.info("No past jobs found.")
 
-    is_job_active = bool(st.session_state[STATE_JOB_NAME])
+    # ----- MAIN AREA -----
 
-    # ----- Section 1: Submit -----
-    if not is_job_active:
+    # --- Context controls in MAIN AREA ---
+    st.header("🧠 Context (optional)")
+    if st.session_state.get(STATE_CTX_MODE) == "Implicit shared prefix":
+        st.session_state[STATE_CACHE_NAME] = None
+        st.session_state[STATE_IMPLICIT_PREFIX] = st.text_area(
+            "Shared prefix to prepend to every request:",
+            height=160,
+            help="Place common instructions/background here to maximize implicit cache hits (Gemini 2.5).",
+            value=st.session_state.get(STATE_IMPLICIT_PREFIX) or ""
+        )
+
+    elif st.session_state.get(STATE_CTX_MODE) == "Explicit cache":
+        st.session_state[STATE_IMPLICIT_PREFIX] = None
+
+        with st.form("explicit_cache_form_main", clear_on_submit=False):
+            context_text = st.text_area(
+                "Cache this context once (used by all requests):",
+                height=200,
+                help="Long instructions, docs, code, etc. This is stored server-side and referenced by name.",
+            )
+            ttl_minutes = st.number_input(
+                "TTL (minutes)",
+                min_value=1,
+                max_value=24 * 60,
+                value=60,
+                help="Cache expires automatically after TTL."
+            )
+            sys_instructions = st.text_area(
+                "Optional system instruction (developer message):",
+                height=100,
+            )
+            make_cache = st.form_submit_button("Create / Refresh Cache", type="primary")
+
+        if make_cache:
+            try:
+                cache = bh.create_context_cache(
+                    model=model,
+                    context_text=context_text or "",
+                    ttl_seconds=int(ttl_minutes) * 60,
+                    display_name="gem-batch-cache",
+                    system_instruction=sys_instructions or None,
+                )
+            except Exception as e:
+                st.error(f"Failed to create cache: {e}")
+            else:
+                st.session_state[STATE_CACHE_NAME] = cache.name
+                st.success(f"Cache ready: {cache.name}")
+
+        if st.session_state.get(STATE_CACHE_NAME):
+            cols = st.columns(2)
+            cols[0].info(f"Active cache: `{st.session_state[STATE_CACHE_NAME]}`")
+            if cols[1].button("Delete Cache"):
+                try:
+                    bh.delete_context_cache(st.session_state[STATE_CACHE_NAME])
+                    st.session_state[STATE_CACHE_NAME] = None
+                    st.toast("Cache deleted.")
+                except Exception as e:
+                    st.error(f"Failed to delete cache: {e}")
+
+    else:
+        # None
+        st.session_state[STATE_CACHE_NAME] = None
+        st.session_state[STATE_IMPLICIT_PREFIX] = None
+        st.caption("No additional context will be added to requests.")
+
+    st.divider()
+
+    # ===========================
+    # ====== RUN: REGULAR  ======
+    # ===========================
+    if run_mode == "Regular":
+        st.header("⚡ Regular Mode")
+        with st.form("regular_form"):
+            prompts_raw = st.text_area(
+                "Enter prompts (one per line)",
+                height=220,
+                help="Each line is sent as a separate GenerateContent call (immediate, non-batch).",
+            )
+            submit_reg = st.form_submit_button("▶ Run Regular", type="primary", use_container_width=True)
+
+        if submit_reg:
+            # Ensure client exists
+            if not bh.client and st.session_state.get(STATE_API_KEY):
+                try:
+                    bh.initialize_client(st.session_state[STATE_API_KEY])
+                except Exception as e:
+                    st.error(f"Client init failed: {e}")
+                    st.stop()
+
+            prompts = [p.strip() for p in (prompts_raw or "").splitlines() if p.strip()]
+            if not prompts:
+                st.warning("Please enter at least one prompt.")
+            else:
+                with st.spinner("Running requests..."):
+                    try:
+                        results, usage = bh.generate_content_regular(
+                            model=model,
+                            user_texts=prompts,
+                            implicit_prefix=st.session_state.get(STATE_IMPLICIT_PREFIX),
+                            cache_name=st.session_state.get(STATE_CACHE_NAME),
+                        )
+                        st.session_state[STATE_REGULAR_RESULTS] = results
+                        st.session_state[STATE_REGULAR_USAGE] = usage
+                    except Exception as e:
+                        st.error(f"Regular run failed: {e}")
+
+        # Show results if present
+        if st.session_state.get(STATE_REGULAR_RESULTS) is not None:
+            results = st.session_state[STATE_REGULAR_RESULTS] or []
+            usage = st.session_state.get(STATE_REGULAR_USAGE) or {}
+
+            st.subheader("✅ Results (Regular Mode)")
+            for i, item in enumerate(results, 1):
+                with st.expander(f"Response {i}", expanded=False):
+                    if item.get("error"):
+                        st.error(item["error"])
+                    txt = (item.get("text") or "").strip()
+                    if txt:
+                        st.markdown(txt)
+                    else:
+                        st.caption("No plain-text answer parsed; see raw JSON below.")
+                    with st.popover("View Raw Response JSON"):
+                        st.json(item.get("response") or {})
+
+            # Report + downloadable combined .txt (report + Q&A)
+            rep, combined_txt = _regular_report_and_txt(
+                results=results,
+                usage=usage,
+                implicit_prefix=st.session_state.get(STATE_IMPLICIT_PREFIX),
+            )
+            st.divider()
+            st.subheader("📊 Usage Report")
+            st.code(rep, language="text")
+            st.download_button(
+                label="📝 Download Q&A + Report (.txt)",
+                data=combined_txt,
+                file_name="gemini_regular_output_with_report.txt",
+                mime="text/plain",
+            )
+
+    # ===========================
+    # ====== RUN: BATCH    ======
+    # ===========================
+    if run_mode == "Batch":
+        # ----- Section 1: Submit -----
+        is_job_active = bool(st.session_state[STATE_JOB_NAME])
+
         st.header("✍️ 1. Submit a New Batch Job")
         with st.form("submission_form"):
             if mode == "Inline":
@@ -420,7 +521,7 @@ def run_app():
                 uploaded_file = st.file_uploader("Upload a JSONL file", type=["jsonl"])
                 prompt_input = None
 
-            submitted = st.form_submit_button("🚀 Submit Job", type="primary", disabled=not is_api_key_set)
+            submitted = st.form_submit_button("🚀 Submit Job", type="primary")
 
         if submitted:
             if not bh.client and st.session_state.get(STATE_API_KEY):
@@ -479,17 +580,15 @@ def run_app():
                     out_path = in_path
                     cache_name = st.session_state.get(STATE_CACHE_NAME)
                     if cache_name:
-                        # Re-write JSONL with cached_content injected
-                        base, ext = os.path.splitext(in_path)
+                        base, _ = os.path.splitext(in_path)
                         out_path = base + ".with_cache.jsonl"
                         try:
                             bh.inject_cached_content_into_jsonl_file(in_path, out_path, cache_name)
                             st.info("Injected cached_content into the uploaded JSONL for explicit caching.")
                         except Exception as e:
                             st.error(f"Failed to inject cached_content into JSONL: {e}")
-                            out_path = in_path  # fallback to original
+                            out_path = in_path  # fallback
 
-                    # Note: implicit prefix has no meaning for File mode unless your file already includes it.
                     st.session_state[STATE_LAST_REQUEST] = {
                         "mode": "File",
                         "path": out_path,
@@ -528,128 +627,143 @@ def run_app():
                     except (GoogleAPICallError, GoogleAPIError, Exception) as e:
                         st.error(f"🚨 Failed to submit job. {e}")
 
-    # ----- Section 2: Monitor -----
-    if is_job_active:
-        st.header("⏳ 2. Monitor Active Job")
-        st.info(f"**Job Name:** `{st.session_state[STATE_JOB_NAME]}`")
+        # ----- Section 2: Monitor -----
+        is_job_active = bool(st.session_state[STATE_JOB_NAME])
+        if is_job_active:
+            st.header("⏳ 2. Monitor Active Job")
+            st.info(f"**Job Name:** `{st.session_state[STATE_JOB_NAME]}`")
 
-        if st.session_state.get(STATE_JOB_STATUS) not in TERMINAL_STATES:
-            if st.button("🔄 Refresh Job Status"):
-                with st.spinner("Polling status…"):
-                    try:
-                        job = bh.poll_batch_job_status(st.session_state[STATE_JOB_NAME])
-                        st.session_state[STATE_JOB_STATUS] = job.state.name
-                        if st.session_state[STATE_JOB_STATUS] == "JOB_STATE_SUCCEEDED":
-                            st.session_state[STATE_JOB_RESULTS] = bh.retrieve_batch_job_results(
-                                st.session_state[STATE_JOB_NAME]
-                            )
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"🚨 API Error while polling: {e}")
-                        st.session_state[STATE_JOB_STATUS] = "JOB_STATE_FAILED"
-                        st.rerun()
-
-        final_status = st.session_state.get(STATE_JOB_STATUS, "UNKNOWN")
-        st.metric("Current Status", final_status)
-
-        if final_status == "JOB_STATE_SUCCEEDED":
-            st.success("Job completed successfully.")
-            if st.session_state.get(STATE_JOB_RESULTS):
-                results_list = st.session_state[STATE_JOB_RESULTS]
-                generate_local_summary(results_list)
-
-                # Download JSONL
-                jsonl_blob = _to_jsonl_blob(results_list)
-                st.download_button(
-                    label="⬇️ Download Full Results (JSONL)",
-                    data=jsonl_blob,
-                    file_name=f"gemini_batch_results_{st.session_state[STATE_JOB_NAME].split('/')[-1]}.jsonl",
-                    mime="application/x-ndjson",
-                    type="primary",
-                )
-
-                # Download consolidated TXT report
-                report_txt = _extract_texts_for_report(results_list)
-                st.download_button(
-                    label="📝 Download Consolidated Report (.txt)",
-                    data=report_txt,
-                    file_name=f"gemini_batch_report_{st.session_state[STATE_JOB_NAME].split('/')[-1]}.txt",
-                    mime="text/plain",
-                )
-
-                st.divider()
-                preview_count = st.number_input(
-                    "Number of results to preview:",
-                    min_value=1,
-                    max_value=len(results_list),
-                    value=min(50, len(results_list)),
-                    step=10,
-                )
-                display_job_output(results_list, preview_limit=int(preview_count))
-
-        elif final_status == "JOB_STATE_FAILED":
-            st.error("Job failed.")
-            if st.session_state.get(STATE_LAST_REQUEST):
-                if st.button("🔁 Retry Last Submission", type="primary"):
-                    last = st.session_state[STATE_LAST_REQUEST]
-                    try:
-                        if not bh.client and st.session_state.get(STATE_API_KEY):
-                            bh.initialize_client(st.session_state[STATE_API_KEY])
-
-                        if last["mode"] == "Inline":
-                            inline_requests = []
-                            # rebuild with implicit prefix if any
-                            for p in last.get("prompts", []):
-                                parts = []
-                                if last.get("implicit_prefix"):
-                                    parts.append({"text": last["implicit_prefix"]})
-                                parts.append({"text": p})
-                                inline_requests.append({"contents": [{"parts": parts, "role": "user"}]})
-
-                            if last.get("cache_name"):
-                                inline_requests = bh.augment_requests_with_cached_content(
-                                    inline_requests, last["cache_name"]
+            if st.session_state.get(STATE_JOB_STATUS) not in TERMINAL_STATES:
+                if st.button("🔄 Refresh Job Status"):
+                    with st.spinner("Polling status…"):
+                        try:
+                            job = bh.poll_batch_job_status(st.session_state[STATE_JOB_NAME])
+                            st.session_state[STATE_JOB_STATUS] = job.state.name
+                            if st.session_state[STATE_JOB_STATUS] == "JOB_STATE_SUCCEEDED":
+                                st.session_state[STATE_JOB_RESULTS] = bh.retrieve_batch_job_results(
+                                    st.session_state[STATE_JOB_NAME]
                                 )
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"🚨 API Error while polling: {e}")
+                            st.session_state[STATE_JOB_STATUS] = "JOB_STATE_FAILED"
+                            st.rerun()
 
-                            job = bh.create_inline_batch_job(last["model"], inline_requests, last["name"])
-                        else:
-                            job = bh.create_file_batch_job(last["model"], last["path"], last["name"])
-                        st.session_state[STATE_JOB_NAME] = job.name
-                        st.session_state[STATE_JOB_STATUS] = job.state.name
-                        st.session_state[STATE_JOB_RESULTS] = None
-                        add_to_job_history(cookies, job.name)
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Retry failed: {e}")
+            final_status = st.session_state.get(STATE_JOB_STATUS, "UNKNOWN")
+            st.metric("Current Status", final_status)
 
-        elif final_status == "JOB_STATE_CANCELLED":
-            st.warning("Job was cancelled.")
+            if final_status == "JOB_STATE_SUCCEEDED":
+                st.success("Job completed successfully.")
+                if st.session_state.get(STATE_JOB_RESULTS):
+                    results_list = st.session_state[STATE_JOB_RESULTS]
+                    # Summary for batch (no per-line usage generally)
+                    st.subheader("📊 Results Summary")
+                    st.markdown(f"- **Total Responses:** {len(results_list)}")
 
-        elif final_status == "JOB_STATE_EXPIRED":
-            st.warning("Job expired (no results). Consider splitting into smaller batches.")
+                    # Download JSONL
+                    jsonl_blob = _to_jsonl_blob(results_list)
+                    st.download_button(
+                        label="⬇️ Download Full Results (JSONL)",
+                        data=jsonl_blob,
+                        file_name=f"gemini_batch_results_{st.session_state[STATE_JOB_NAME].split('/')[-1]}.jsonl",
+                        mime="application/x-ndjson",
+                        type="primary",
+                    )
 
-        st.divider()
-        st.header("⚙️ 3. Manage Job")
-        c1, c2 = st.columns(2)
-        with c1:
-            is_cancellable = final_status not in TERMINAL_STATES
-            if st.button("❌ Cancel Job", disabled=not is_cancellable, use_container_width=True):
-                with st.spinner("Sending cancellation request..."):
+                    # Also offer TXT with only extracted texts
+                    extracted_txt = _extract_texts_for_report(results_list)
+                    st.download_button(
+                        label="📝 Download Consolidated Answers (.txt)",
+                        data=extracted_txt,
+                        file_name=f"gemini_batch_answers_{st.session_state[STATE_JOB_NAME].split('/')[-1]}.txt",
+                        mime="text/plain",
+                    )
+
+                    st.divider()
+                    preview_count = st.number_input(
+                        "Number of results to preview:",
+                        min_value=1,
+                        max_value=len(results_list),
+                        value=min(50, len(results_list)),
+                        step=10,
+                    )
+                    # Show previews
+                    for i, line in enumerate(results_list[: int(preview_count)], start=1):
+                        try:
+                            obj = json.loads(line)
+                        except json.JSONDecodeError:
+                            obj = {"raw": line}
+                        with st.expander(f"Response {i}", expanded=False):
+                            text = _extract_best_text_from_obj(obj) or ""
+                            if text:
+                                st.markdown(text)
+                            else:
+                                st.caption("No plain-text answer parsed; see raw JSON below.")
+                            with st.popover("View JSON"):
+                                st.json(obj)
+
+            elif final_status == "JOB_STATE_FAILED":
+                st.error("Job failed.")
+                if st.session_state.get(STATE_LAST_REQUEST):
+                    if st.button("🔁 Retry Last Submission", type="primary"):
+                        last = st.session_state[STATE_LAST_REQUEST]
+                        try:
+                            if not bh.client and st.session_state.get(STATE_API_KEY):
+                                bh.initialize_client(st.session_state[STATE_API_KEY])
+
+                            if last["mode"] == "Inline":
+                                inline_requests = []
+                                for p in last.get("prompts", []):
+                                    parts = []
+                                    if last.get("implicit_prefix"):
+                                        parts.append({"text": last["implicit_prefix"]})
+                                    parts.append({"text": p})
+                                    inline_requests.append({"contents": [{"parts": parts, "role": "user"}]})
+
+                                if last.get("cache_name"):
+                                    inline_requests = bh.augment_requests_with_cached_content(
+                                        inline_requests, last["cache_name"]
+                                    )
+
+                                job = bh.create_inline_batch_job(last["model"], inline_requests, last["name"])
+                            else:
+                                job = bh.create_file_batch_job(last["model"], last["path"], last["name"])
+                            st.session_state[STATE_JOB_NAME] = job.name
+                            st.session_state[STATE_JOB_STATUS] = job.state.name
+                            st.session_state[STATE_JOB_RESULTS] = None
+                            add_to_job_history(cookies, job.name)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Retry failed: {e}")
+
+            elif final_status == "JOB_STATE_CANCELLED":
+                st.warning("Job was cancelled.")
+
+            elif final_status == "JOB_STATE_EXPIRED":
+                st.warning("Job expired (no results). Consider splitting into smaller batches.")
+
+            st.divider()
+            st.header("⚙️ 3. Manage Job")
+            c1, c2 = st.columns(2)
+            with c1:
+                is_cancellable = final_status not in TERMINAL_STATES
+                if st.button("❌ Cancel Job", disabled=not is_cancellable, use_container_width=True):
+                    with st.spinner("Sending cancellation request..."):
+                        try:
+                            bh.cancel_batch_job(st.session_state[STATE_JOB_NAME])
+                            st.session_state[STATE_JOB_STATUS] = "JOB_STATE_CANCELLED"
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Cancel failed: {e}")
+
+            with c2:
+                if st.button("🗑️ Delete & Reset App", type="secondary", use_container_width=True):
                     try:
-                        bh.cancel_batch_job(st.session_state[STATE_JOB_NAME])
-                        st.session_state[STATE_JOB_STATUS] = "JOB_STATE_CANCELLED"
-                        st.rerun()
+                        bh.delete_batch_job(st.session_state[STATE_JOB_NAME])
                     except Exception as e:
-                        st.error(f"Cancel failed: {e}")
-
-        with c2:
-            if st.button("🗑️ Delete & Reset App", type="secondary", use_container_width=True):
-                try:
-                    bh.delete_batch_job(st.session_state[STATE_JOB_NAME])
-                except Exception as e:
-                    st.warning(f"Could not delete job from API (may already be deleted): {e}")
-                finally:
-                    reset_app_state(cookies)
+                        st.warning(f"Could not delete job from API (may already be deleted): {e}")
+                    finally:
+                        reset_app_state(cookies)
 
 
 if __name__ == "__main__":
