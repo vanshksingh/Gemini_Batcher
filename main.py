@@ -15,11 +15,10 @@ from dotenv import load_dotenv
 from google.api_core.exceptions import GoogleAPIError, GoogleAPICallError, ResourceExhausted
 
 # Cookie managers
-# pip install streamlit-cookies-manager
 from streamlit_cookies_manager import EncryptedCookieManager
 from streamlit_cookies_manager import CookieManager as PlainCookieManager
 
-# 🚨 Import the module, not just functions, so we can set bh.client explicitly
+# Import module so we can set its global client
 import batch_handler as bh
 
 # ---------------- Constants / Keys ----------------
@@ -31,6 +30,8 @@ STATE_JOB_STATUS = "job_status"
 STATE_JOB_RESULTS = "job_results"
 STATE_API_KEY = "api_key"
 STATE_LAST_REQUEST = "last_request"
+STATE_CACHE_NAME = "cache_name"             # explicit cache name
+STATE_IMPLICIT_PREFIX = "implicit_prefix"   # implicit shared prefix
 
 TERMINAL_STATES = {
     "JOB_STATE_SUCCEEDED",
@@ -50,27 +51,16 @@ DEFAULT_MODELS = [
 # ---------------- Cache (new API) ----------------
 @st.cache_resource(show_spinner=False)
 def _cached_initialize_client(api_key: str):
-    # Uses your preferred load_dotenv + env fallback inside initialize_client
     return bh.initialize_client(api_key)
 
 
 @st.cache_data(show_spinner=False)
 def _to_jsonl_blob(lines: list[str]) -> str:
-    """Join a list of JSON strings into a JSONL blob."""
     return "\n".join(lines)
 
 
-# ---------- Common result parsing: support multiple schemas ----------
+# ---------- Common result parsing ----------
 def _extract_best_text_from_obj(obj: dict) -> str | None:
-    """
-    Try multiple shapes in priority order:
-    1) obj['response']['text']
-    2) obj['response']['candidates'][0]['content']['parts'][*]['text']
-    3) obj['candidates'][0]['content']['parts'][*]['text']
-    4) obj['content']['parts'][*]['text']
-    5) obj['text']
-    Returns first non-empty string, else None.
-    """
     resp = obj.get("response")
     if isinstance(resp, dict):
         t = resp.get("text")
@@ -86,7 +76,6 @@ def _extract_best_text_from_obj(obj: dict) -> str | None:
                     pt = p.get("text")
                     if isinstance(pt, str) and pt.strip():
                         return pt.strip()
-
     cand2 = obj.get("candidates")
     if isinstance(cand2, list) and cand2:
         c0 = cand2[0] or {}
@@ -97,7 +86,6 @@ def _extract_best_text_from_obj(obj: dict) -> str | None:
                 pt = p.get("text")
                 if isinstance(pt, str) and pt.strip():
                     return pt.strip()
-
     content2 = obj.get("content", {})
     if isinstance(content2, dict):
         parts2 = content2.get("parts", [])
@@ -106,17 +94,14 @@ def _extract_best_text_from_obj(obj: dict) -> str | None:
                 pt = p.get("text")
                 if isinstance(pt, str) and pt.strip():
                     return pt.strip()
-
     t2 = obj.get("text")
     if isinstance(t2, str) and t2.strip():
         return t2.strip()
-
     return None
 
 
 @st.cache_data(show_spinner=False)
 def _extract_texts_for_report(lines: list[str]) -> str:
-    """Extract best-effort text from each JSON line and return a single consolidated plaintext report."""
     chunks = []
     for i, line in enumerate(lines, start=1):
         line = (line or "").strip()
@@ -125,7 +110,6 @@ def _extract_texts_for_report(lines: list[str]) -> str:
         except json.JSONDecodeError:
             chunks.append(f"--- Response {i} ---\n[RAW]\n{line}\n")
             continue
-
         txt = _extract_best_text_from_obj(obj)
         if txt:
             chunks.append(f"--- Response {i} ---\n{txt}\n")
@@ -138,16 +122,11 @@ def _extract_texts_for_report(lines: list[str]) -> str:
 
 # ---------------- Cookies ----------------
 def get_cookie_manager():
-    """
-    Use encrypted cookies only if COOKIE_SECRET env var is provided.
-    This avoids the 'NoneType has no attribute encode' error.
-    """
     secret = os.getenv("COOKIE_SECRET")
     if secret:
         cookies = EncryptedCookieManager(prefix="gem_batch_runner", password=secret)
     else:
         cookies = PlainCookieManager(prefix="gem_batch_runner")
-
     if not cookies.ready():
         st.stop()
     return cookies
@@ -155,7 +134,15 @@ def get_cookie_manager():
 
 # ---------------- State Helpers ----------------
 def init_state():
-    for k in [STATE_JOB_NAME, STATE_JOB_STATUS, STATE_JOB_RESULTS, STATE_API_KEY, STATE_LAST_REQUEST]:
+    for k in [
+        STATE_JOB_NAME,
+        STATE_JOB_STATUS,
+        STATE_JOB_RESULTS,
+        STATE_API_KEY,
+        STATE_LAST_REQUEST,
+        STATE_CACHE_NAME,
+        STATE_IMPLICIT_PREFIX,
+    ]:
         st.session_state.setdefault(k, None)
 
 
@@ -213,14 +200,12 @@ def display_job_output(results_str_list, preview_limit=50):
     total_results = len(results_str_list)
     if total_results > preview_limit:
         st.info(f"Showing first {preview_limit} of {total_results}. Use download for full output.")
-
     for i, line in enumerate(results_str_list[:preview_limit]):
         line = (line or "").strip()
         try:
             res_json = json.loads(line)
         except json.JSONDecodeError:
             res_json = {"raw": line}
-
         with st.expander(f"Response {i+1}", expanded=False):
             text_content = _extract_best_text_from_obj(res_json)
             if text_content:
@@ -245,11 +230,9 @@ def generate_local_summary(results_str_list):
         except json.JSONDecodeError:
             errors += 1
             continue
-
         if "error" in res and not res.get("response"):
             errors += 1
             continue
-
         text = _extract_best_text_from_obj(res) or ""
         if not text.strip():
             errors += 1
@@ -314,9 +297,8 @@ def run_app():
         is_api_key_set = False
         if st.session_state.get(STATE_API_KEY):
             try:
-                # Initialize + explicitly wire the module-global client
                 client_obj = _cached_initialize_client(st.session_state[STATE_API_KEY])
-                bh.client = client_obj  # 🔑 ensure batch_handler sees an initialized client
+                bh.client = client_obj  # ensure module-global is set
                 is_api_key_set = True
             except Exception as e:
                 st.error(f"Failed to initialize client: {e}")
@@ -328,10 +310,11 @@ def run_app():
         st.divider()
         model = st.selectbox("Model", DEFAULT_MODELS, index=0, disabled=not is_api_key_set)
 
+        # Batch Mode with helper icon
         batch_mode_help = (
             "Inline → pass a small list of requests directly in the API call (quick tests, ≤~20MB total).\n\n"
-            "File (JSONL) → upload a .jsonl file with hundreds/thousands of requests (up to 2GB), "
-            "results come back as a downloadable JSONL file."
+            "File (JSONL) → upload a .jsonl file with hundreds/thousands of requests (up to 2GB). "
+            "Results come back as a downloadable JSONL file."
         )
         mode = st.radio(
             "Batch Mode",
@@ -340,7 +323,74 @@ def run_app():
             help=batch_mode_help,
         )
 
-        job_display_name = st.text_input("Display Name", value="my-gemini-job", disabled=not is_api_key_set)
+        # ---- NEW: Context block ----
+        st.divider()
+        st.header("🧠 Context (optional)")
+        ctx_choice = st.radio(
+            "How to add context?",
+            ["None", "Implicit shared prefix", "Explicit cache"],
+            help=(
+                "Implicit (Gemini 2.5): We prepend a shared prefix to every request; "
+                "the API automatically applies cache-hit discounts when prefixes match. "
+                "Explicit: We create a cached context once (with TTL) and reference it from each request."
+            ),
+        )
+
+        if ctx_choice == "Implicit shared prefix":
+            st.session_state[STATE_CACHE_NAME] = None
+            st.session_state[STATE_IMPLICIT_PREFIX] = st.text_area(
+                "Shared prefix (prepended to every request):",
+                height=160,
+                help="Place large/common instructions or background here to maximize implicit cache hits.",
+            )
+
+        elif ctx_choice == "Explicit cache":
+            st.session_state[STATE_IMPLICIT_PREFIX] = None
+            with st.form("explicit_cache_form", clear_on_submit=False):
+                context_text = st.text_area(
+                    "Cache this context once (used by all requests):",
+                    height=200,
+                    help="Long instructions, docs, code, etc. This is stored on the server and referenced by name.",
+                )
+                ttl_minutes = st.number_input(
+                    "TTL (minutes)", min_value=1, max_value=24 * 60, value=60,
+                    help="Cache expires automatically after TTL."
+                )
+                sys_instructions = st.text_area(
+                    "Optional system instruction (developer message):",
+                    height=100,
+                )
+                make_cache = st.form_submit_button("Create / Refresh Cache", type="primary")
+
+            if make_cache:
+                try:
+                    cache = bh.create_context_cache(
+                        model=model,
+                        context_text=context_text or "",
+                        ttl_seconds=int(ttl_minutes) * 60,
+                        display_name="gem-batch-cache",
+                        system_instruction=sys_instructions or None,
+                    )
+                    st.session_state[STATE_CACHE_NAME] = cache.name
+                    st.success(f"Cache ready: {cache.name}")
+                except Exception as e:
+                    st.error(f"Failed to create cache: {e}")
+
+            if st.session_state.get(STATE_CACHE_NAME):
+                cols = st.columns(2)
+                cols[0].info(f"Active cache: `{st.session_state[STATE_CACHE_NAME]}`")
+                if cols[1].button("Delete Cache"):
+                    try:
+                        bh.delete_context_cache(st.session_state[STATE_CACHE_NAME])
+                        st.session_state[STATE_CACHE_NAME] = None
+                        st.toast("Cache deleted.")
+                    except Exception as e:
+                        st.error(f"Failed to delete cache: {e}")
+
+        else:
+            # None
+            st.session_state[STATE_CACHE_NAME] = None
+            st.session_state[STATE_IMPLICIT_PREFIX] = None
 
         st.divider()
         st.header("📜 Job History")
@@ -373,7 +423,6 @@ def run_app():
             submitted = st.form_submit_button("🚀 Submit Job", type="primary", disabled=not is_api_key_set)
 
         if submitted:
-            # 🔒 Final guard: make sure module-global client exists right now
             if not bh.client and st.session_state.get(STATE_API_KEY):
                 try:
                     bh.initialize_client(st.session_state[STATE_API_KEY])
@@ -389,15 +438,30 @@ def run_app():
                 if not prompts:
                     st.warning("Please enter at least one prompt.")
                 else:
+                    # Build inline requests, with optional implicit prefix
+                    inline_requests = []
+                    for p in prompts:
+                        parts = []
+                        if st.session_state.get(STATE_IMPLICIT_PREFIX):
+                            parts.append({"text": st.session_state[STATE_IMPLICIT_PREFIX]})
+                        parts.append({"text": p})
+                        inline_requests.append({"contents": [{"parts": parts, "role": "user"}]})
+
+                    # If explicit cache is set, inject cached_content into each request
+                    if st.session_state.get(STATE_CACHE_NAME):
+                        inline_requests = bh.augment_requests_with_cached_content(
+                            inline_requests, st.session_state[STATE_CACHE_NAME]
+                        )
+
                     st.session_state[STATE_LAST_REQUEST] = {
                         "mode": "Inline",
                         "prompts": prompts,
                         "model": model,
                         "name": job_display_name,
+                        "implicit_prefix": st.session_state.get(STATE_IMPLICIT_PREFIX),
+                        "cache_name": st.session_state.get(STATE_CACHE_NAME),
                     }
-                    inline_requests = [
-                        {"contents": [{"parts": [{"text": p}], "role": "user"}]} for p in prompts
-                    ]
+
                     job_fn = bh.create_inline_batch_job
                     job_args = (model, inline_requests, job_display_name)
 
@@ -405,20 +469,38 @@ def run_app():
                 if not uploaded_file:
                     st.warning("Please upload a JSONL file.")
                 else:
+                    # Optionally rewrite JSONL to inject cached_content
                     temp_dir = "temp_uploads"
                     os.makedirs(temp_dir, exist_ok=True)
-                    jsonl_path = os.path.join(temp_dir, uploaded_file.name)
-                    with open(jsonl_path, "wb") as f:
+                    in_path = os.path.join(temp_dir, uploaded_file.name)
+                    with open(in_path, "wb") as f:
                         f.write(uploaded_file.getbuffer())
 
+                    out_path = in_path
+                    cache_name = st.session_state.get(STATE_CACHE_NAME)
+                    if cache_name:
+                        # Re-write JSONL with cached_content injected
+                        base, ext = os.path.splitext(in_path)
+                        out_path = base + ".with_cache.jsonl"
+                        try:
+                            bh.inject_cached_content_into_jsonl_file(in_path, out_path, cache_name)
+                            st.info("Injected cached_content into the uploaded JSONL for explicit caching.")
+                        except Exception as e:
+                            st.error(f"Failed to inject cached_content into JSONL: {e}")
+                            out_path = in_path  # fallback to original
+
+                    # Note: implicit prefix has no meaning for File mode unless your file already includes it.
                     st.session_state[STATE_LAST_REQUEST] = {
                         "mode": "File",
-                        "path": jsonl_path,
+                        "path": out_path,
                         "model": model,
                         "name": job_display_name,
+                        "implicit_prefix": None,
+                        "cache_name": cache_name,
                     }
+
                     job_fn = bh.create_file_batch_job
-                    job_args = (model, jsonl_path, job_display_name)
+                    job_args = (model, out_path, job_display_name)
 
             if job_fn and job_args:
                 with st.spinner("Submitting job..."):
@@ -511,14 +593,24 @@ def run_app():
                 if st.button("🔁 Retry Last Submission", type="primary"):
                     last = st.session_state[STATE_LAST_REQUEST]
                     try:
-                        # Ensure client before retry
                         if not bh.client and st.session_state.get(STATE_API_KEY):
                             bh.initialize_client(st.session_state[STATE_API_KEY])
 
                         if last["mode"] == "Inline":
-                            inline_requests = [
-                                {"contents": [{"parts": [{"text": p}], "role": "user"}]} for p in last["prompts"]
-                            ]
+                            inline_requests = []
+                            # rebuild with implicit prefix if any
+                            for p in last.get("prompts", []):
+                                parts = []
+                                if last.get("implicit_prefix"):
+                                    parts.append({"text": last["implicit_prefix"]})
+                                parts.append({"text": p})
+                                inline_requests.append({"contents": [{"parts": parts, "role": "user"}]})
+
+                            if last.get("cache_name"):
+                                inline_requests = bh.augment_requests_with_cached_content(
+                                    inline_requests, last["cache_name"]
+                                )
+
                             job = bh.create_inline_batch_job(last["model"], inline_requests, last["name"])
                         else:
                             job = bh.create_file_batch_job(last["model"], last["path"], last["name"])

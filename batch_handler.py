@@ -33,6 +33,8 @@ def initialize_client(api_key: Optional[str] = None) -> genai.Client:
     return client
 
 
+# ---------------- Batch creation ----------------
+
 def create_inline_batch_job(model: str, requests: List[dict], display_name: str):
     """Create a batch job from inline GenerateContentRequest dicts."""
     if not client:
@@ -74,6 +76,8 @@ def poll_batch_job_status(job_name: str):
     return client.batches.get(name=job_name)
 
 
+# ---------------- Results ----------------
+
 def _inline_responses_to_json_lines(job) -> List[str]:
     """
     Convert inline responses to a JSON-lines-like list[str].
@@ -91,9 +95,7 @@ def _inline_responses_to_json_lines(job) -> List[str]:
                 lines.append(r.response.to_json())  # SDK helper
             except Exception:
                 lines.append(
-                    json.dumps(
-                        {"response": {"text": getattr(r.response, "text", "")}}
-                    )
+                    json.dumps({"response": {"text": getattr(r.response, "text", "")}})
                 )
         elif getattr(r, "error", None):
             try:
@@ -122,14 +124,12 @@ def retrieve_batch_job_results(job_name: str) -> List[str]:
             payload["error"] = str(job.error)
         return [json.dumps(payload)]
 
-    # File-based output (JSONL)
     dest = getattr(job, "dest", None)
     file_name = getattr(dest, "file_name", None)
     if file_name:
         file_bytes: bytes = client.files.download(file=file_name)
         return file_bytes.decode("utf-8").rstrip("\n").split("\n")
 
-    # Inline output (normalize to JSONL-style list[str])
     return _inline_responses_to_json_lines(job)
 
 
@@ -145,8 +145,87 @@ def delete_batch_job(job_name: str):
     return client.batches.delete(name=job_name)
 
 
+# ---------------- Context helpers ----------------
+def create_context_cache(
+    model: str,
+    context_text: str,
+    ttl_seconds: int = 3600,
+    display_name: Optional[str] = None,
+    system_instruction: Optional[str] = None,
+):
+    """
+    Create an explicit context cache and return the cache object.
+    The cache is tied to the provided model. You can include an optional system instruction.
+    """
+    if not client:
+        raise RuntimeError("Client not initialized. Call initialize_client() first.")
+    model = _normalize_model_id(model)
+
+    # Build contents (single Content with user role text)
+    contents = [
+        {
+            "role": "user",
+            "parts": [{"text": context_text}],
+        }
+    ]
+
+    cfg = {
+        "display_name": display_name or "batch-context-cache",
+        "model": model,
+        "ttl": f"{int(ttl_seconds)}s",
+        "contents": contents,
+    }
+
+    if system_instruction and system_instruction.strip():
+        cfg["system_instruction"] = {"parts": [{"text": system_instruction.strip()}]}
+
+    cache = client.caches.create(**cfg)
+    return cache
+
+
+def delete_context_cache(cache_name: str):
+    if not client:
+        raise RuntimeError("Client not initialized. Call initialize_client() first.")
+    return client.caches.delete(name=cache_name)
+
+
+def augment_requests_with_cached_content(requests: List[dict], cache_name: str) -> List[dict]:
+    """
+    For each GenerateContentRequest dict in `requests`, ensure it contains
+    config.cached_content=<cache_name>. Returns a NEW list.
+    """
+    out: List[dict] = []
+    for req in requests:
+        r = json.loads(json.dumps(req))  # deep copy
+        cfg = r.get("config", {})
+        cfg["cached_content"] = cache_name
+        r["config"] = cfg
+        out.append(r)
+    return out
+
+
+def inject_cached_content_into_jsonl_file(src_jsonl: str, dst_jsonl: str, cache_name: str):
+    """
+    Read a JSONL file where each line looks like:
+      {"key":"...", "request": { ... }}
+    and write to dst_jsonl with `request.config.cached_content` injected.
+    """
+    with open(src_jsonl, "r", encoding="utf-8") as fin, open(dst_jsonl, "w", encoding="utf-8") as fout:
+        for line in fin:
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            req = obj.setdefault("request", {})
+            cfg = req.get("config", {})
+            cfg["cached_content"] = cache_name
+            req["config"] = cfg
+            obj["request"] = req
+            fout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+
 if __name__ == "__main__":
-    # Optional quick smoke test (requires GEMINI_API_KEY)
+    # Optional smoke test (requires GEMINI_API_KEY)
     try:
         initialize_client()
         print("Gemini client initialized OK.")
