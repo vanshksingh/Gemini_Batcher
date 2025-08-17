@@ -1,41 +1,60 @@
 # 📦 Gemini Batch Runner Pro
 
-🚀 Streamlit-powered UI for batch prediction with Gemini 2.5 API  
-🔗 GSoC 2025 Project Extension — Adds Context Caching, Batch Modes, and Job Management
+🚀 Streamlit-powered UI for **regular and batch predictions** with Gemini 2.5 API
+🔗 GSoC 2025 Project Extension — Adds **Context Caching, Multi-Run Modes, Usage Reports, and Job Management**
 
 ---
 
 ## 📖 Overview
 
-**Gemini Batch Runner Pro** is an interactive Streamlit app that allows you to submit and manage **batch jobs** using the Gemini API.  
+**Gemini Batch Runner Pro** is an interactive Streamlit app for developers, researchers, and AI engineers to **run, manage, and optimize Gemini API calls**.
 
-It supports **multiple batch input modes**, integrates **context caching (explicit & implicit)**, and provides a **visual dashboard** to track jobs, preview results, and optimize token usage.
+It supports **Batch Mode (Inline or File)** and **Regular Mode**, integrates **context caching (explicit & implicit)**, and generates detailed **usage reports** with token savings estimation.
 
-### ✨ Key Features
+---
 
-- 🛠️ **Configuration Panel**
-  - API key management (stored in cookies securely)
-  - Model selection (`gemini-2.5-flash`, `gemini-2.0-pro`, etc.)
-  - Batch mode selector: Inline | File (JSONL)
+## ✨ Key Features
 
-- 📦 **Batch Job Submission**
-  - Inline text queries
-  - JSONL file upload for large batch input
-  - Add **context** via explicit or implicit cache for queries
+* 🛠️ **Configuration Panel**
 
-- ⏳ **Monitor Jobs**
-  - Live status updates (e.g., `JOB_STATE_RUNNING`, `JOB_STATE_SUCCEEDED`)
-  - Job history log with re-run options
+  * API key management (secure cookie storage)
+  * Model selection (`gemini-2.5-flash`, `gemini-2.0-pro`, etc.)
+  * Run mode selector: **Batch** | **Regular**
+  * Context Mode: **None** | **Implicit shared prefix** | **Explicit cache**
 
-- 📊 **Results Dashboard**
-  - Preview responses inline
-  - Export results (JSON/CSV)
-  - View error/refusal breakdown
+* ⚡ **Regular Mode**
 
-- 💾 **Context Caching Integration**
-  - Explicit cache: One-time upload, guaranteed reuse (`@use_cache {name}`)
-  - Implicit cache: Automatic overlap detection, less strict but cost-saving
-  - No cache: Always send full context
+  * Run single or multiple prompts (one per line)
+  * Add context (implicit/explicit cache)
+  * Get structured results inline
+  * **Automatic usage report** showing token breakdown + estimated cost savings
+  * Export final Q\&A + report as **TXT file**
+
+* 📦 **Batch Mode**
+
+  * **Inline input**: quick multi-query jobs
+  * **File input**: upload `.jsonl` file with thousands of queries
+  * Add **context** (explicit or implicit cache)
+  * Submit and track long-running jobs
+  * **Helper tooltip** (`ⓘ`) explaining modes
+
+* ⏳ **Job Monitoring**
+
+  * Live job status (e.g., `JOB_STATE_RUNNING`, `JOB_STATE_SUCCEEDED`)
+  * Job history log with re-run support
+  * Error & refusal breakdowns
+
+* 📊 **Results Dashboard**
+
+  * Inline preview of responses
+  * Export results as JSON/CSV/TXT
+  * Downloadable **final report with answers + usage stats**
+
+* 💾 **Context Caching**
+
+  * **Explicit cache**: Upload once, guaranteed reuse (`@use_cache {name}`)
+  * **Implicit cache**: Auto-reuse overlapping prefixes
+  * **No cache**: Always send full context
 
 ---
 
@@ -46,7 +65,7 @@ It supports **multiple batch input modes**, integrates **context caching (explic
 ```bash
 git clone https://github.com/vanshksingh/Gemini_BatchRunnerPro.git
 cd Gemini_BatchRunnerPro
-````
+```
 
 ### 2. Create Virtual Environment
 
@@ -65,8 +84,6 @@ pip install -r requirements.txt
 
 👉 [Generate API Key](https://aistudio.google.com/app/apikey)
 
-Copy it and keep it safe.
-
 ### 5. Configure `.env`
 
 ```env
@@ -79,7 +96,7 @@ GEMINI_API_KEY=your_api_key_here
 
 ```
 Gemini_BatchRunnerPro/
-├── main.py               # Streamlit app entrypoint
+├── main.py               # Streamlit app entrypoint (UI + logic)
 ├── cache_utils.py        # Explicit/implicit cache helpers
 ├── gem_cache.py          # Cache-aware planning logic
 ├── requirements.txt      # Python dependencies
@@ -88,36 +105,18 @@ Gemini_BatchRunnerPro/
 
 ---
 
-## 🧠 Batch Modes Explained
+## 🧠 Run Modes & Context Options
 
-| Mode             | Usage                                                            |
-| ---------------- | ---------------------------------------------------------------- |
-| **Inline**       | Manually enter queries in a text area; best for quick testing.   |
-| **File**         | Upload a `.jsonl` file containing queries in bulk.               |
-| **With Context** | Inject explicit/implicit cached context so queries reuse tokens. |
+| Mode        | Description                                                                 |
+| ----------- | --------------------------------------------------------------------------- |
+| **Regular** | Run single/multiple prompts directly with caching + inline usage reports.   |
+| **Batch**   | Large-scale execution (inline or JSONL file). Includes monitoring & export. |
 
-ℹ️ A small helper tooltip (`ⓘ`) is available in the app next to the **Batch Mode selector** explaining these options.
-
----
-
-## 🧩 Core Components
-
-### `main.py`
-
-* Streamlit UI
-* Job creation + monitoring
-* Context caching integration
-* Results preview/export
-
-### `cache_utils.py`
-
-* Create, fetch, and delete explicit caches
-* Wrap queries with `@use_cache`
-
-### `gem_cache.py`
-
-* Plans optimal batch execution
-* Chooses between explicit, implicit, or no cache
+| Context  | Benefit                        | Tradeoff                   |
+| -------- | ------------------------------ | -------------------------- |
+| Explicit | Guaranteed reuse (75% cheaper) | Immutable, one-time upload |
+| Implicit | Auto-reuse overlaps            | Not guaranteed             |
+| None     | Always send full context       | Most expensive             |
 
 ---
 
@@ -132,53 +131,51 @@ streamlit run main.py
 ### Use Case Example
 
 1. Select **Model**: `gemini-2.5-flash`
-2. Choose **Batch Mode**: `File (JSONL)`
-3. Upload `queries.jsonl`
-4. Optionally add **context**:
+2. Choose **Run Mode**: `Regular`
+3. Enter prompts:
 
-   * Explicit: Upload document once, reuse across queries
-   * Implicit: Let system auto-reuse overlapping tokens
-5. Submit Job 🚀
-
----
-
-## 📊 Results Summary
-
-* ✅ Total responses vs. failures
-* ⚠️ Content refusals detected
-* 📜 Full JSON output preview
-* 💾 Export answers for downstream use
+   ```
+   hi
+   bye
+   ```
+4. Context Mode: `Explicit cache` (optional)
+5. Get answers + **download TXT report with Q\&A and token savings**
 
 ---
 
-## 📦 Context Caching Options
+## 📊 Reports & Exports
 
-| Type     | Benefit                        | Tradeoff                   |
-| -------- | ------------------------------ | -------------------------- |
-| Explicit | Guaranteed reuse (75% cheaper) | Immutable, one-time upload |
-| Implicit | Auto-reuse overlaps            | Not guaranteed             |
-| None     | Always send full context       | Most expensive             |
+* ✅ **Usage Report**
+
+  * Total prompts
+  * Input, output, total tokens
+  * Cached vs billable tokens
+  * Cost savings from cache
+
+* 📜 **Q\&A Export**
+
+  * Clean **TXT file** containing:
+
+    * Each question
+    * Corresponding answer
+    * Usage report at the end
 
 ---
 
 ## 🛡️ Error Handling
 
 * Missing API key → error prompt
-* Failed batch → retry option
-* Incomplete responses → flagged in results table
+* Uninitialized client → guided fix
+* Empty/no response → flagged in preview
+* Batch failures → retry option
 
----
-
-## 📸 Screenshots
-
-(Suggest adding screenshots of: Config panel, Batch Mode selection with helper icon, Job Monitoring panel, Results preview)
 
 ---
 
 ## 🧑‍💻 Contributing
 
 1. Fork this repo
-2. Create a feature branch: `git checkout -b feature/xyz`
+2. Create a branch: `git checkout -b feature/xyz`
 3. Push changes and open PR 🚀
 
 ---
@@ -195,3 +192,4 @@ MIT License © 2025 Vansh Kumar Singh
 * [Gemini Studio](https://aistudio.google.com/)
 * [DeepCache Project (related work)](https://github.com/vanshksingh/Gemini_DeepCache)
 
+---
