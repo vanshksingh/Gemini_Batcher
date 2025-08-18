@@ -1,0 +1,5 @@
+python-dotenv~=1.0.1
+google-genai>=0.5.0
+streamlit~=1.39.0
+streamlit-cookies-manager~=0.2.0
+google-api-core>=2.19.0
