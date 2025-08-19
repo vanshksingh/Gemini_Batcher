@@ -1,5 +1,8 @@
 # 📦 Gemini Batch Runner Pro
 
+<img width="240" height="135" alt="Copy of Copy of Copy of remixed-2" src="https://github.com/user-attachments/assets/c2910949-95d2-4c6e-a018-1bb703ddd0d4" />
+
+
 🚀 Streamlit-powered UI for **regular and batch predictions** with Gemini 2.5 API
 🔗 GSoC 2025 Project Extension — Adds **Context Caching, Multi-Run Modes, Usage Reports, and Job Management**
 
