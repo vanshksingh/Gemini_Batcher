@@ -7,6 +7,9 @@
 🔗 GSoC 2025 Project Extension — Adds **Context Caching, Multi-Run Modes, Usage Reports, and Job Management**
 
 ---
+## ⚠️ Known API issue:
+In free tier of Gemini API Explicit cache is not functioning, it is being internally escalated for a fix at the moment.
+---
 
 ## 📖 Overview
 
