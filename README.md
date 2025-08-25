@@ -9,6 +9,8 @@
 ---
 ## ⚠️ Known API issue:
 In free tier of Gemini API Explicit cache is not functioning, it is being internally escalated for a fix at the moment.
+The Batch Mode is also limited to the Paid Tier of Gemini Api, although it is not reflected in documents, escaleted for a fix at the moment.
+
 ---
 
 ## 📖 Overview
@@ -63,6 +65,22 @@ It supports **Batch Mode (Inline or File)** and **Regular Mode**, integrates **c
   * **No cache**: Always send full context
 
 ---
+
+## 🖥️ UI & Screenshots
+
+### 1. Main Homepage
+<img width="1429" height="1167" alt="Screenshot 2025-08-25 at 6 59 52 AM" src="https://github.com/user-attachments/assets/cce7d5c9-9b28-4304-aa97-53ea5e52975f" />
+
+### 2. Cache Creation Page
+<img width="1429" height="1167" alt="Screenshot 2025-08-25 at 7 00 38 AM" src="https://github.com/user-attachments/assets/50eaf2b1-2436-44ba-a560-a9b3d45d837d" />
+
+
+### 3. More Screenshots
+Additional screenshots (Query page, Cache/File management, Reports, etc.) are available in the  
+[`/Screenshots`](./Screenshots) folder.
+
+---
+
 
 ## 🔧 Setup Instructions
 
