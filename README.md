@@ -1,7 +1,15 @@
 # 📦 Gemini Batch Runner Pro
 
+<img width="1199" height="674" alt="Screenshot 2025-08-19 at 8 59 37 PM" src="https://github.com/user-attachments/assets/e77e9849-24a8-4fda-be4c-3725095d9200" />
+
+
 🚀 Streamlit-powered UI for **regular and batch predictions** with Gemini 2.5 API
 🔗 GSoC 2025 Project Extension — Adds **Context Caching, Multi-Run Modes, Usage Reports, and Job Management**
+
+---
+## ⚠️ Known API issue:
+In free tier of Gemini API Explicit cache is not functioning, it is being internally escalated for a fix at the moment.
+The Batch Mode is also limited to the Paid Tier of Gemini Api, although it is not reflected in documents, escaleted for a fix at the moment.
 
 ---
 
@@ -57,6 +65,22 @@ It supports **Batch Mode (Inline or File)** and **Regular Mode**, integrates **c
   * **No cache**: Always send full context
 
 ---
+
+## 🖥️ UI & Screenshots
+
+### 1. Main Homepage
+<img width="1429" height="1167" alt="Screenshot 2025-08-25 at 6 59 52 AM" src="https://github.com/user-attachments/assets/cce7d5c9-9b28-4304-aa97-53ea5e52975f" />
+
+### 2. Cache Creation Page
+<img width="1429" height="1167" alt="Screenshot 2025-08-25 at 7 00 38 AM" src="https://github.com/user-attachments/assets/50eaf2b1-2436-44ba-a560-a9b3d45d837d" />
+
+
+### 3. More Screenshots
+Additional screenshots (Query page, Cache/File management, Reports, etc.) are available in the  
+[`/Screenshots`](./Screenshots) folder.
+
+---
+
 
 ## 🔧 Setup Instructions
 
